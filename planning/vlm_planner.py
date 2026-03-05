@@ -247,8 +247,8 @@ class SimplePlanner:
             {"skill": "grasp", "params": {}},
             # 5. Lift arm straight up above basket height
             {"skill": "lift", "params": {}},
-            # 6. Walk sideways right toward basket
-            {"skill": "lateral_walk", "params": {"direction": "right", "distance": 0.4, "speed": 0.10}},
+            # 6. Walk to basket with arm held (PID handles heading)
+            {"skill": "walk_to", "params": {"target": "table_01", "stop_distance": 0.30, "hold_arm": True}},
             # 7. Lower arm into basket
             {"skill": "lower", "params": {}},
             # 8. Release into basket

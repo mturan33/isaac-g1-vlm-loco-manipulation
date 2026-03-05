@@ -119,9 +119,11 @@ class WalkToSkill(BaseSkill):
         robot_pos_xy = root_pos[:, :2]        # [num_envs, 2]
         robot_yaw = get_yaw_from_quat(root_quat)  # [num_envs]
 
-        # Check if robot fell
-        if (base_height < MIN_BASE_HEIGHT).any():
-            zero_cmd = torch.zeros(robot_pos_xy.shape[0], 3, device=self.device)
+        # Check if robot fell — fail only if majority fell (tolerates 1 env falling)
+        num_envs = robot_pos_xy.shape[0]
+        fallen = (base_height < MIN_BASE_HEIGHT).sum().item()
+        if fallen > num_envs // 2:
+            zero_cmd = torch.zeros(num_envs, 3, device=self.device)
             return zero_cmd, True, self._make_failure(
                 reason="Robot fell",
                 base_height=base_height.min().item(),

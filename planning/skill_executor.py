@@ -22,6 +22,7 @@ import torch
 from typing import Any, Optional
 
 from .semantic_map import SemanticMap
+from ..low_level.velocity_command import get_yaw_from_quat, normalize_angle
 
 
 class SkillExecutor:
@@ -416,18 +417,49 @@ class SkillExecutor:
         env.set_arm_target_world(reachable_target_world)
         env.reset_arm_policy_state()
 
-        # Stand still during reach (no forward lean -- object on table)
+        # Save hold position -- PID will maintain robot here during reach
+        # This counteracts arm policy reaction forces that push robot backward
+        hold_pos_xy = root_pos[:, :2].clone()
+        hold_yaw = get_yaw_from_quat(root_quat).clone()
+        print(f"  [Reach] Hold position: [{hold_pos_xy[0,0]:.3f}, {hold_pos_xy[0,1]:.3f}], yaw={hold_yaw[0]:.3f}")
+
+        # PID position holding during reach
         reach_steps = 160
         best_obj_dist = float('inf')
         best_ee_dist = float('inf')
         attached_during_reach = False
 
-        print(f"  [Reach] Starting active reach ({reach_steps} steps)...")
+        print(f"  [Reach] Starting active reach ({reach_steps} steps) with PID hold...")
         for step in range(reach_steps):
             if not self._is_running():
                 break
 
-            obs = env.step_arm_policy(self._stand_cmd)
+            # Compute position-correction velocity (PID hold)
+            cur_root_pos = env.robot.data.root_pos_w
+            cur_root_quat = env.robot.data.root_quat_w
+            cur_pos_xy = cur_root_pos[:, :2]
+            cur_yaw = get_yaw_from_quat(cur_root_quat)
+
+            # Position error in world frame (toward hold position)
+            delta_w = hold_pos_xy - cur_pos_xy
+            drift = delta_w.norm(dim=-1).mean().item()
+
+            # Convert to body frame
+            cos_y = torch.cos(cur_yaw)
+            sin_y = torch.sin(cur_yaw)
+            dx_body = cos_y * delta_w[:, 0] + sin_y * delta_w[:, 1]
+            dy_body = -sin_y * delta_w[:, 0] + cos_y * delta_w[:, 1]
+
+            # P-controller: push robot back toward hold position
+            vx = (dx_body * 2.0).clamp(-0.3, 0.3)
+            vy = (dy_body * 1.0).clamp(-0.15, 0.15)
+
+            # Heading hold
+            heading_err = normalize_angle(hold_yaw - cur_yaw)
+            vyaw = (heading_err * 1.5).clamp(-0.3, 0.3)
+
+            hold_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+            obs = env.step_arm_policy(hold_cmd)
 
             # Track distances using LIVE positions
             ee_world, _ = env._compute_palm_ee()
@@ -442,9 +474,8 @@ class SkillExecutor:
                 standing = (obs["base_height"] > 0.5).sum().item()
                 print(f"  [Reach] Step {step:3d} | h={h:.2f} | "
                       f"stand={standing}/{env.num_envs} | "
-                      f"EE->tgt={ee_dist:.3f} | EE->obj={obj_dist:.3f} | "
-                      f"EE=[{ee_world[0,0]:.2f},{ee_world[0,1]:.2f},{ee_world[0,2]:.2f}] "
-                      f"Obj=[{live_obj_pos[0,0]:.2f},{live_obj_pos[0,1]:.2f},{live_obj_pos[0,2]:.2f}]")
+                      f"EE->obj={obj_dist:.3f} | drift={drift:.3f} | "
+                      f"hold_cmd=[{vx[0]:.2f},{vy[0]:.2f},{vyaw[0]:.2f}]")
 
             # Magnetic attach: 0.15m trigger (15cm threshold)
             if not attached_during_reach and obj_dist < 0.15:
@@ -587,6 +618,17 @@ class SkillExecutor:
         # Freeze arm at current position
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+
+        # Stabilize after lift — robot squats during arm policy, needs recovery
+        print("  [Lift] Stabilizing (100 steps)...")
+        for step in range(100):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
+            if step % 25 == 0:
+                h = obs["base_height"].mean().item()
+                standing = (obs["base_height"] > 0.5).sum().item()
+                print(f"  [Lift] Stabilize {step}/100 | h={h:.2f} | stand={standing}/{env.num_envs}")
 
         ee_final, _ = env._compute_palm_ee()
         print(f"  [Lift] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")

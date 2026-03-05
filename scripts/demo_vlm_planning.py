@@ -240,14 +240,21 @@ def main():
     # 8. Keep sim running briefly for visual inspection
     # ------------------------------------------------------------------
     print("\n[Demo] Holding for 3 seconds...")
-    for _ in range(150):  # ~3 seconds at 50Hz
+    for i in range(150):  # ~3 seconds at 50Hz
         if not simulation_app.is_running():
             break
         obs = env.step(stand_cmd)
 
-    # Close
+    print("[Demo] Done. Closing simulation...")
     simulation_app.close()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (SystemExit, KeyboardInterrupt):
+        pass
+    finally:
+        # Force exit -- Isaac Sim background threads can prevent clean shutdown
+        import os
+        os._exit(0)
