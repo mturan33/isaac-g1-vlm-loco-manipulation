@@ -313,6 +313,47 @@ class SkillExecutor:
         effective_dist = float('inf')
         step = 0
 
+        # Pre-walk yaw correction: turn in place to face target before walking
+        # Prevents simultaneous vx+vy+vyaw that topples robot with arm load
+        root_pos_pre = env.robot.data.root_pos_w
+        root_quat_pre = env.robot.data.root_quat_w
+        yaw_pre = get_yaw_from_quat(root_quat_pre)
+        delta_pre = target_xy - root_pos_pre[:, :2]
+        target_heading_pre = torch.atan2(delta_pre[:, 1], delta_pre[:, 0])
+        heading_err_pre = normalize_angle(target_heading_pre - yaw_pre)
+        yaw_err_deg = abs(heading_err_pre.mean().item()) * 57.3
+
+        if yaw_err_deg > 15:
+            print(f"  [OmniWalk] Pre-walk yaw correction: {yaw_err_deg:.1f}deg off-target, turning in place...")
+            for turn_step in range(80):
+                if not self._is_running():
+                    break
+                root_pos_t = env.robot.data.root_pos_w
+                root_quat_t = env.robot.data.root_quat_w
+                yaw_t = get_yaw_from_quat(root_quat_t)
+                delta_t = target_xy - root_pos_t[:, :2]
+                target_heading_t = torch.atan2(delta_t[:, 1], delta_t[:, 0])
+                heading_err_t = normalize_angle(target_heading_t - yaw_t)
+
+                # Only yaw, no forward/lateral
+                vyaw_turn = (heading_err_t * 0.8).clamp(-0.3, 0.3)
+                turn_cmd = torch.stack([
+                    torch.zeros_like(vyaw_turn),
+                    torch.zeros_like(vyaw_turn),
+                    vyaw_turn,
+                ], dim=-1)
+                obs = env.step_manipulation(turn_cmd, arm_targets)
+
+                remaining_err = abs(heading_err_t.mean().item()) * 57.3
+                if remaining_err < 10:
+                    print(f"  [OmniWalk] Yaw corrected at step {turn_step}: {remaining_err:.1f}deg remaining")
+                    break
+            # Brief stabilize after turn
+            for _ in range(20):
+                if not self._is_running():
+                    break
+                obs = env.step_manipulation(self._stand_cmd, arm_targets)
+
         for step in range(max_steps):
             if not self._is_running():
                 break
@@ -349,6 +390,15 @@ class SkillExecutor:
             target_heading = torch.atan2(delta[:, 1], delta[:, 0])
             heading_err = normalize_angle(target_heading - yaw)
             vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
+
+            # Velocity ramp-up: start slow, gradually increase over first 100 steps
+            # Prevents sudden forces that topple robot with asymmetric arm load
+            RAMP_STEPS = 100
+            if step < RAMP_STEPS:
+                ramp = 0.3 + 0.7 * (step / RAMP_STEPS)  # 0.3 → 1.0
+                vx = vx * ramp
+                vy = vy * ramp
+                vyaw = vyaw * ramp
 
             vel_cmd = torch.stack([vx, vy, vyaw], dim=-1)
             obs = env.step_manipulation(vel_cmd, arm_targets)
