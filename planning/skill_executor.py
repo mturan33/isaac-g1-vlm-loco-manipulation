@@ -638,14 +638,21 @@ class SkillExecutor:
             if not attached_during_reach and obj_dist < 0.20:
                 attached_during_reach = env.attach_object_to_hand(max_dist=0.25)
                 if attached_during_reach:
+                    attach_step = step
                     print(f"  [Reach] ** Magnetic attach at step {step}! dist={obj_dist:.3f}m **")
-                    break
+                    print(f"  [Reach] Continuing arm policy for 20 more steps to stabilize with load...")
+
+            # After attach, run 20 more steps so arm adapts to object weight, then break
+            if attached_during_reach and step >= attach_step + 20:
+                print(f"  [Reach] Post-attach stabilization done at step {step}")
+                break
 
         print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->obj: {best_obj_dist:.3f}m")
 
         # Hold phase: freeze arm, PID hold position for stability
-        # Shortened to 25 steps -- less time with destabilizing asymmetric arm load
-        print("  [Reach] Holding arm position (25 steps)...")
+        # Shortened: if attached, arm already stabilized during post-attach steps
+        reach_hold_steps = 15 if attached_during_reach else 25
+        print(f"  [Reach] Holding arm position ({reach_hold_steps} steps)...")
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
@@ -655,15 +662,15 @@ class SkillExecutor:
         self._hold_pos_xy = hold_pos_xy
         self._hold_yaw = hold_yaw
 
-        for step in range(25):
+        for step in range(reach_hold_steps):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
-            if step % 12 == 0:
+            if step % max(reach_hold_steps // 3, 1) == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Reach] Hold {step}/25 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
+                print(f"  [Reach] Hold {step}/{reach_hold_steps} | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
 
         # Final distance check
         ee_world, _ = env._compute_palm_ee()
@@ -728,12 +735,26 @@ class SkillExecutor:
         print(f"  [Grasp] Start | h={h:.2f} | stand={standing}/{env.num_envs} | "
               f"hold=[{hold_pos_xy[0,0]:.3f},{hold_pos_xy[0,1]:.3f}]")
 
-        # Close fingers for 20 steps with moderate PID hold
-        for step in range(20):
+        # Determine grasp timing based on whether object is already attached
+        if already_attached:
+            # Object attached during reach — minimize grasp time to prevent drift accumulation
+            # Root cause of falls: 70 steps of frozen arm + object weight = asymmetric torque → fall
+            finger_steps = 10  # Quick finger close (visual only)
+            hold_steps = 10    # Minimal hold
+            pid_scale = 1.0    # Full PID — need maximum stability
+            print(f"  [Grasp] FAST mode (already attached): {finger_steps}+{hold_steps} steps, PID={pid_scale}")
+        else:
+            finger_steps = 20
+            hold_steps = 25
+            pid_scale = 0.8
+            print(f"  [Grasp] NORMAL mode: {finger_steps}+{hold_steps} steps, PID={pid_scale}")
+
+        # Close fingers
+        for step in range(finger_steps):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            hold_cmd *= 0.8  # Moderate -- was 0.5, too gentle → drift accumulation
+            hold_cmd *= pid_scale
             obs = env.step_manipulation(hold_cmd, arm_targets)
 
         # Magnetic attach (skip if already attached)
@@ -742,18 +763,18 @@ class SkillExecutor:
         else:
             attached = True
 
-        # Brief hold (25 steps) with moderate PID
-        for step in range(25):
+        # Brief hold with PID
+        for step in range(hold_steps):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            hold_cmd *= 0.8  # Moderate corrections (was 0.5)
+            hold_cmd *= pid_scale
             obs = env.step_manipulation(hold_cmd, arm_targets)
 
-            if step % 12 == 0:
+            if step % max(hold_steps // 3, 1) == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Grasp] Hold {step}/25 | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                print(f"  [Grasp] Hold {step}/{hold_steps} | h={h:.2f} | stand={standing}/{env.num_envs} | "
                       f"drift={drift:.3f} | Attached: {attached}")
 
             # Early stop if majority fell -- no point holding further
