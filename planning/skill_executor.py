@@ -341,14 +341,14 @@ class SkillExecutor:
             dy_body = -sin_y * delta[:, 0] + cos_y * delta[:, 1]
 
             # Proportional velocity commands (forward + lateral simultaneously)
-            # High gains + wide clamps for fast walking in manipulation mode
-            vx = (dx_body * 1.2).clamp(-0.50, 0.50)
-            vy = (dy_body * 0.8).clamp(-0.30, 0.30)
+            # Conservative gains — robot carries asymmetric load, aggressive turns cause falls
+            vx = (dx_body * 1.0).clamp(-0.40, 0.40)
+            vy = (dy_body * 0.6).clamp(-0.20, 0.20)
 
-            # Gradually face the target
+            # Gradually face the target (low yaw rate to prevent falls with load)
             target_heading = torch.atan2(delta[:, 1], delta[:, 0])
             heading_err = normalize_angle(target_heading - yaw)
-            vyaw = (heading_err * 0.8).clamp(-0.6, 0.6)
+            vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
 
             vel_cmd = torch.stack([vx, vy, vyaw], dim=-1)
             obs = env.step_manipulation(vel_cmd, arm_targets)
