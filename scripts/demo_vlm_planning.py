@@ -166,44 +166,25 @@ class VideoRecorder:
               f"frames -> {self.frame_dir}")
 
     def set_camera_pose(self, eye: tuple, target: tuple):
-        """Update the offscreen camera position and look-at target."""
-        import math
+        """Update the offscreen camera position and look-at target.
+
+        Uses Gf.Matrix4d.SetLookAt which handles the USD camera convention
+        (camera looks down -Z axis, Y is up) correctly.
+        """
         from pxr import Gf
 
-        ex, ey, ez = eye
-        tx, ty, tz = target
+        eye_v = Gf.Vec3d(*eye)
+        target_v = Gf.Vec3d(*target)
+        up_v = Gf.Vec3d(0, 0, 1)  # Z-up world
 
-        # Forward vector (camera looks at -Z in USD convention)
-        fwd = Gf.Vec3d(tx - ex, ty - ey, tz - ez)
-        fwd_len = fwd.GetLength()
-        if fwd_len < 1e-6:
-            return
-        fwd = fwd / fwd_len
+        # SetLookAt builds a VIEW matrix (world->camera).
+        # We need the INVERSE (camera->world) for the xform.
+        view = Gf.Matrix4d()
+        view.SetLookAt(eye_v, target_v, up_v)
+        # SetLookAt returns view matrix; camera xform = inverse
+        cam_xform = view.GetInverse()
 
-        # Right = fwd x world_up (Z-up)
-        world_up = Gf.Vec3d(0, 0, 1)
-        right = fwd ^ world_up  # cross product
-        right_len = right.GetLength()
-        if right_len < 1e-6:
-            right = Gf.Vec3d(1, 0, 0)
-        else:
-            right = right / right_len
-
-        # True up = right x fwd
-        up = right ^ fwd
-
-        # USD Camera convention: -Z forward, +X right, +Y up
-        # Build a 4x4 matrix: columns are right, up, -fwd, translate
-        m = Gf.Matrix4d()
-        m.SetIdentity()
-        m[0][0], m[0][1], m[0][2] = right[0], up[0], -fwd[0]
-        m[1][0], m[1][1], m[1][2] = right[1], up[1], -fwd[1]
-        m[2][0], m[2][1], m[2][2] = right[2], up[2], -fwd[2]
-        m[3][0], m[3][1], m[3][2] = 0, 0, 0
-        m[0][3], m[1][3], m[2][3] = ex, ey, ez
-        m[3][3] = 1.0
-
-        self._xform_op.Set(m)
+        self._xform_op.Set(cam_xform)
 
     def on_step(self):
         """Call after every sim step. Captures frame at correct interval."""
@@ -588,8 +569,11 @@ def main():
     # 9. Finalize video recording
     # ------------------------------------------------------------------
     if recorder is not None:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_name = f"demo_pickup_{timestamp}.mp4"
         print(f"\n[Demo] Finalizing video ({recorder.frame_count} frames)...")
-        recorder.finalize(output_name="demo_pickup.mp4")
+        recorder.finalize(output_name=video_name)
 
     print("[Demo] Done.")
 
