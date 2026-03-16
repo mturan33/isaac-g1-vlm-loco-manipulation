@@ -623,11 +623,11 @@ class SkillExecutor:
                 # CARRY mode: heading-aligned velocity controller
                 # vx scaled by cos(heading_err) → only walk forward when aimed at target
                 # Combined with periodic stop-turn-walk for drift correction
-                speed_scale = (dist_per_env / 2.0).clamp(0.10, 1.0)  # decelerate within 2.0m
+                speed_scale = (dist_per_env / 1.5).clamp(0.20, 1.0)  # decelerate within 1.5m
                 heading_alignment = torch.cos(heading_err).clamp(min=0.0)  # 0@90°, 1@0°
-                vx = (dx_body * 0.6 * speed_scale * heading_alignment).clamp(-0.30, 0.30)
-                vy = (dy_body * 0.8 * speed_scale).clamp(-0.30, 0.30)
-                vyaw = (heading_err * 1.0).clamp(-0.40, 0.40)  # Strong yaw tracking
+                vx = (dx_body * 0.8 * speed_scale * heading_alignment).clamp(-0.40, 0.40)
+                vy = (dy_body * 1.0 * speed_scale).clamp(-0.35, 0.35)
+                vyaw = (heading_err * 0.8).clamp(-0.35, 0.35)  # Strong yaw tracking
             else:
                 # NORMAL mode: full velocities (no load, arm just raised)
                 vx = (dx_body * 1.0).clamp(-0.40, 0.40)
@@ -636,7 +636,7 @@ class SkillExecutor:
 
             # EMA smoothing to prevent zigzag
             raw_cmd = torch.stack([vx, vy, vyaw], dim=-1)
-            ema_alpha = 0.5 if carrying else 0.3
+            ema_alpha = 0.6 if carrying else 0.3
             if step == 0:
                 smoothed_cmd = raw_cmd.clone()
             else:
@@ -1410,9 +1410,11 @@ class SkillExecutor:
         # Start position (current EE in body frame)
         lower_body_start = ee_body.clone()
 
-        # Final forward-down body-frame target (toward basket)
+        # Final forward-down body-frame target (toward basket/table)
+        # Z=0.0 → EE at root height (~0.77m), just above table surface (0.69m)
+        # X=0.35 → forward reach, Y=-0.15 → slightly right (arm workspace)
         lower_body_final = torch.tensor(
-            [[0.38, -0.20, 0.10]], dtype=torch.float32, device=self.device,
+            [[0.35, -0.15, 0.0]], dtype=torch.float32, device=self.device,
         ).expand(env.num_envs, -1)
 
         print(f"  [Lower] Start EE body:  [{ee_body[0,0]:.3f}, {ee_body[0,1]:.3f}, {ee_body[0,2]:.3f}]")
