@@ -129,6 +129,8 @@ class VideoRecorder:
     def finalize(self, output_name: str = "demo_pickup.mp4"):
         """Merge frames into MP4 with ffmpeg."""
         import subprocess
+        import shutil as _shutil
+        import glob as _glob
 
         if self.frame_count == 0:
             print("[VIDEO] No frames captured!")
@@ -137,8 +139,21 @@ class VideoRecorder:
         output_path = os.path.join(self.output_dir, output_name)
         frame_pattern = os.path.join(self.frame_dir, "frame_%06d.png")
 
+        # Find ffmpeg - check PATH first, then common WinGet location
+        ffmpeg_bin = _shutil.which("ffmpeg")
+        if ffmpeg_bin is None:
+            # Search WinGet packages directory
+            winget_pattern = os.path.expanduser(
+                "~/AppData/Local/Microsoft/WinGet/Packages/*/ffmpeg*/bin/ffmpeg.exe"
+            )
+            candidates = _glob.glob(winget_pattern)
+            if candidates:
+                ffmpeg_bin = candidates[0]
+        if ffmpeg_bin is None:
+            ffmpeg_bin = "ffmpeg"  # fallback, will raise FileNotFoundError
+
         cmd = [
-            "ffmpeg", "-y",
+            ffmpeg_bin, "-y",
             "-framerate", str(self.fps),
             "-i", frame_pattern,
             "-c:v", "libx264",
