@@ -347,7 +347,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(2.85, -0.35, 0.72),  # Front-right of table, safely on surface
+            pos=(2.85, -0.20, 0.72),  # Front of table, between basket and right edge
         ),
     )
 

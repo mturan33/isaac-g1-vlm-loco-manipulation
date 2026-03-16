@@ -354,7 +354,7 @@ def main():
         obs = env.step(stand_cmd)
 
     # Verify object didn't fall off table during stabilization
-    obj_z = env.pickup_object.data.root_pos_w[0, 2].item()
+    obj_z = env.pickup_obj.data.root_pos_w[0, 2].item()
     print(f"[Demo] Object z after stabilize: {obj_z:.3f}m "
           f"({'ON TABLE' if obj_z > 0.4 else 'FELL OFF TABLE!'})")
 
