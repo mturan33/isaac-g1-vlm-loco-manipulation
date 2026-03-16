@@ -91,6 +91,116 @@ sys.stdout.reconfigure(line_buffering=True)
 
 import isaaclab.sim as sim_utils
 
+
+# ============================================================================
+# Video Recorder (Yöntem C: viewport frame capture → ffmpeg merge)
+# ============================================================================
+class VideoRecorder:
+    """Captures viewport frames at target FPS, then merges with ffmpeg."""
+
+    def __init__(self, output_dir: str, fps: int = 25, sim_dt: float = 0.02):
+        self.output_dir = output_dir
+        self.fps = fps
+        self.frame_dir = os.path.join(output_dir, "frames")
+        os.makedirs(self.frame_dir, exist_ok=True)
+        self.frame_count = 0
+        self._sim_step = 0
+        # Capture every N-th sim step to achieve target FPS
+        # sim runs at 1/sim_dt Hz (e.g., 50Hz), target is fps (e.g., 25)
+        self._capture_interval = max(1, int(1.0 / (sim_dt * fps)))
+
+        from omni.kit.viewport.utility import get_active_viewport
+        self.viewport = get_active_viewport()
+        print(f"[VIDEO] Recorder initialized: {fps} FPS, "
+              f"capture every {self._capture_interval} sim steps, "
+              f"frames -> {self.frame_dir}")
+
+    def on_step(self):
+        """Call after every sim step. Captures frame at correct interval."""
+        self._sim_step += 1
+        if self._sim_step % self._capture_interval == 0:
+            from omni.kit.viewport.utility import capture_viewport_to_file
+            frame_path = os.path.join(
+                self.frame_dir, f"frame_{self.frame_count:06d}.png"
+            )
+            capture_viewport_to_file(self.viewport, frame_path)
+            self.frame_count += 1
+
+    def finalize(self, output_name: str = "demo_pickup.mp4"):
+        """Merge frames into MP4 with ffmpeg."""
+        import subprocess
+
+        if self.frame_count == 0:
+            print("[VIDEO] No frames captured!")
+            return None
+
+        output_path = os.path.join(self.output_dir, output_name)
+        frame_pattern = os.path.join(self.frame_dir, "frame_%06d.png")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(self.fps),
+            "-i", frame_pattern,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", "18",
+            output_path,
+        ]
+
+        print(f"\n[VIDEO] Converting {self.frame_count} frames to MP4...")
+        print(f"[VIDEO] Command: {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            print(f"[VIDEO] Saved: {output_path}")
+
+            import shutil
+            shutil.rmtree(self.frame_dir)
+            print(f"[VIDEO] Cleaned up frames")
+            return output_path
+        except subprocess.CalledProcessError as e:
+            print(f"[VIDEO] ffmpeg error: {e.stderr.decode()[:500]}")
+            print(f"[VIDEO] Frames saved in: {self.frame_dir}")
+            print(f"[VIDEO] Manual merge: ffmpeg -framerate {self.fps} "
+                  f"-i {frame_pattern} -c:v libx264 -pix_fmt yuv420p {output_path}")
+            return None
+        except FileNotFoundError:
+            print(f"[VIDEO] ffmpeg not found! Install: pip install ffmpeg-python or system ffmpeg")
+            print(f"[VIDEO] Frames saved in: {self.frame_dir}")
+            print(f"[VIDEO] Manual merge: ffmpeg -framerate {self.fps} "
+                  f"-i {frame_pattern} -c:v libx264 -pix_fmt yuv420p {output_path}")
+            return None
+
+
+def _wrap_env_for_recording(env, recorder: VideoRecorder):
+    """Monkey-patch env step methods to call recorder.on_step() after each step.
+
+    This avoids modifying skill_executor.py — all ~22 step calls automatically
+    get frame capture without any changes.
+    """
+    original_step = env.step
+    original_step_manipulation = env.step_manipulation
+    original_step_arm_policy = env.step_arm_policy
+
+    def _step_with_record(*args, **kwargs):
+        result = original_step(*args, **kwargs)
+        recorder.on_step()
+        return result
+
+    def _step_manipulation_with_record(*args, **kwargs):
+        result = original_step_manipulation(*args, **kwargs)
+        recorder.on_step()
+        return result
+
+    def _step_arm_policy_with_record(*args, **kwargs):
+        result = original_step_arm_policy(*args, **kwargs)
+        recorder.on_step()
+        return result
+
+    env.step = _step_with_record
+    env.step_manipulation = _step_manipulation_with_record
+    env.step_arm_policy = _step_arm_policy_with_record
+    print("[VIDEO] Env step methods wrapped for recording")
+
 # Add parent of high_low_hierarchical_g1 to path so package imports work
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PKG_PARENT = os.path.dirname(_PKG_DIR)
@@ -121,6 +231,8 @@ def main():
     if args_cli.planner == "vlm":
         print(f"  VLM model  : {args_cli.ollama_model}")
         print(f"  Ollama URL : {args_cli.ollama_url}")
+    if args_cli.record:
+        print(f"  Recording  : {args_cli.record_dir} @ {args_cli.record_fps} FPS")
     print("=" * 60)
 
     # ------------------------------------------------------------------
@@ -154,6 +266,19 @@ def main():
         device=device,
         arm_checkpoint_path=args_cli.arm_checkpoint,
     )
+
+    # ------------------------------------------------------------------
+    # 2b. Setup video recording (wraps env step methods)
+    # ------------------------------------------------------------------
+    recorder = None
+    if args_cli.record:
+        print("\n[Demo] Setting up video recording...")
+        recorder = VideoRecorder(
+            output_dir=args_cli.record_dir,
+            fps=args_cli.record_fps,
+            sim_dt=PHYSICS_DT,
+        )
+        _wrap_env_for_recording(env, recorder)
 
     # ------------------------------------------------------------------
     # 3. Reset environment
@@ -260,6 +385,13 @@ def main():
             print("[Demo] Hold timeout reached")
             break
         obs = env.step(stand_cmd)
+
+    # ------------------------------------------------------------------
+    # 9. Finalize video recording
+    # ------------------------------------------------------------------
+    if recorder is not None:
+        print(f"\n[Demo] Finalizing video ({recorder.frame_count} frames)...")
+        recorder.finalize(output_name="demo_pickup.mp4")
 
     print("[Demo] Done.")
 
