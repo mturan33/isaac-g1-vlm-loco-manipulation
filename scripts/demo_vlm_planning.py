@@ -171,35 +171,98 @@ class VideoRecorder:
             return None
 
 
-def _wrap_env_for_recording(env, recorder: VideoRecorder):
-    """Monkey-patch env step methods to call recorder.on_step() after each step.
+class CameraTracker:
+    """Tracks robot position with EMA-smoothed camera following.
+
+    Camera offset is relative to robot: 45 degrees front-right of right shoulder,
+    ~2m away, at shoulder height. Updates every 2 sim steps for performance.
+    """
+
+    # Camera offset relative to robot origin (body frame convention: +X forward, +Y left)
+    # 45 deg front-right, 2m away, shoulder height (~1.0m)
+    # front-right = negative Y (right), positive X (front)
+    EYE_OFFSET = (1.4, -1.4, 1.1)      # 2m at 45deg: (2*cos45, -2*sin45, height)
+    TARGET_OFFSET = (0.3, -0.1, 0.7)   # Look at torso/hand area
+
+    def __init__(self):
+        self._smooth_x = 0.0
+        self._smooth_y = 0.0
+        self._alpha = 0.3   # EMA: responsive but no jitter
+        self._step = 0
+        self._initialized = False
+
+    def update(self, robot_pos_w: torch.Tensor):
+        """Call every sim step. Updates camera every 2 steps."""
+        self._step += 1
+        if self._step % 2 != 0:
+            return
+
+        rx = robot_pos_w[0, 0].item()
+        ry = robot_pos_w[0, 1].item()
+
+        if not self._initialized:
+            self._smooth_x = rx
+            self._smooth_y = ry
+            self._initialized = True
+        else:
+            self._smooth_x += self._alpha * (rx - self._smooth_x)
+            self._smooth_y += self._alpha * (ry - self._smooth_y)
+
+        from isaacsim.core.utils.viewports import set_camera_view
+        eye = (
+            self._smooth_x + self.EYE_OFFSET[0],
+            self._smooth_y + self.EYE_OFFSET[1],
+            self.EYE_OFFSET[2],
+        )
+        target = (
+            self._smooth_x + self.TARGET_OFFSET[0],
+            self._smooth_y + self.TARGET_OFFSET[1],
+            self.TARGET_OFFSET[2],
+        )
+        set_camera_view(eye=eye, target=target)
+
+
+def _wrap_env_for_recording(env, recorder: VideoRecorder = None,
+                            camera_tracker: CameraTracker = None):
+    """Monkey-patch env step methods for camera tracking and/or frame capture.
 
     This avoids modifying skill_executor.py — all ~22 step calls automatically
-    get frame capture without any changes.
+    get camera updates and frame capture without any changes.
     """
     original_step = env.step
     original_step_manipulation = env.step_manipulation
     original_step_arm_policy = env.step_arm_policy
 
+    def _post_step():
+        if camera_tracker is not None:
+            camera_tracker.update(env.robot.data.root_pos_w)
+        if recorder is not None:
+            recorder.on_step()
+
     def _step_with_record(*args, **kwargs):
         result = original_step(*args, **kwargs)
-        recorder.on_step()
+        _post_step()
         return result
 
     def _step_manipulation_with_record(*args, **kwargs):
         result = original_step_manipulation(*args, **kwargs)
-        recorder.on_step()
+        _post_step()
         return result
 
     def _step_arm_policy_with_record(*args, **kwargs):
         result = original_step_arm_policy(*args, **kwargs)
-        recorder.on_step()
+        _post_step()
         return result
 
     env.step = _step_with_record
     env.step_manipulation = _step_manipulation_with_record
     env.step_arm_policy = _step_arm_policy_with_record
-    print("[VIDEO] Env step methods wrapped for recording")
+    features = []
+    if camera_tracker is not None:
+        features.append("camera tracking")
+    if recorder is not None:
+        features.append("frame capture")
+    print(f"[VIDEO] Env step methods wrapped: {', '.join(features)}")
 
 # Add parent of high_low_hierarchical_g1 to path so package imports work
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -252,7 +315,8 @@ def main():
         ),
     )
     sim = sim_utils.SimulationContext(sim_cfg)
-    sim.set_camera_view(eye=[5.0, -5.0, 4.0], target=[1.0, 0.0, 0.5])
+    # Initial camera view — will be overridden by CameraTracker after first step
+    sim.set_camera_view(eye=[1.4, -1.4, 1.1], target=[0.3, -0.1, 0.7])
 
     # ------------------------------------------------------------------
     # 2. Create hierarchical environment
@@ -268,8 +332,9 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # 2b. Setup video recording (wraps env step methods)
+    # 2b. Camera tracking + video recording
     # ------------------------------------------------------------------
+    camera_tracker = CameraTracker()
     recorder = None
     if args_cli.record:
         print("\n[Demo] Setting up video recording...")
@@ -278,7 +343,7 @@ def main():
             fps=args_cli.record_fps,
             sim_dt=PHYSICS_DT,
         )
-        _wrap_env_for_recording(env, recorder)
+    _wrap_env_for_recording(env, recorder=recorder, camera_tracker=camera_tracker)
 
     # ------------------------------------------------------------------
     # 3. Reset environment
