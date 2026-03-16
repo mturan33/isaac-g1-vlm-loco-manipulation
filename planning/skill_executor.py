@@ -423,47 +423,7 @@ class SkillExecutor:
         else:
             print(f"  [OmniWalk] NORMAL mode: full velocities (no load)")
 
-        # Pre-walk yaw correction: only when carrying (asymmetric load makes multi-axis dangerous)
-        root_pos_pre = env.robot.data.root_pos_w
-        root_quat_pre = env.robot.data.root_quat_w
-        yaw_pre = get_yaw_from_quat(root_quat_pre)
-        delta_pre = target_xy - root_pos_pre[:, :2]
-        target_heading_pre = torch.atan2(delta_pre[:, 1], delta_pre[:, 0])
-        heading_err_pre = normalize_angle(target_heading_pre - yaw_pre)
-        yaw_err_deg = abs(heading_err_pre.mean().item()) * 57.3
-
-        if carrying and yaw_err_deg > 15:
-            print(f"  [OmniWalk] Pre-walk yaw correction: {yaw_err_deg:.1f}deg off-target, turning in place...")
-            for turn_step in range(300):
-                if not self._is_running():
-                    break
-                root_pos_t = env.robot.data.root_pos_w
-                root_quat_t = env.robot.data.root_quat_w
-                yaw_t = get_yaw_from_quat(root_quat_t)
-                delta_t = target_xy - root_pos_t[:, :2]
-                target_heading_t = torch.atan2(delta_t[:, 1], delta_t[:, 0])
-                heading_err_t = normalize_angle(target_heading_t - yaw_t)
-
-                # Turn in place — moderate speed, safe with arm load
-                vyaw_turn = (heading_err_t * 1.0).clamp(-0.40, 0.40)
-                turn_cmd = torch.stack([
-                    torch.zeros_like(vyaw_turn),
-                    torch.zeros_like(vyaw_turn),
-                    vyaw_turn,
-                ], dim=-1)
-                obs = env.step_manipulation(turn_cmd, arm_targets)
-
-                remaining_err = abs(heading_err_t.mean().item()) * 57.3
-                if remaining_err < 10:
-                    print(f"  [OmniWalk] Yaw corrected at step {turn_step}: {remaining_err:.1f}deg remaining")
-                    break
-                if turn_step % 50 == 0 and turn_step > 0:
-                    print(f"  [OmniWalk] Turn step {turn_step}: {remaining_err:.1f}deg remaining")
-            # Brief stabilize after turn
-            for _ in range(20):
-                if not self._is_running():
-                    break
-                obs = env.step_manipulation(self._stand_cmd, arm_targets)
+        # No pre-walk yaw correction when carrying — robot walks laterally without turning
 
         # Per-env tracking
         env_reached = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
@@ -516,19 +476,11 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
 
             if carrying:
-                # CARRY mode: turn-first strategy to prevent spiraling
-                # Scale both vx and vy by alignment — only walk when roughly facing target
-                alignment = torch.cos(heading_err).clamp(0.0, 1.0)  # 1.0 = facing target
-                vx = (dx_body * 1.0 * alignment).clamp(-0.40, 0.40)
-                vy = (dy_body * 0.5 * alignment).clamp(-0.20, 0.20)  # Also scaled by alignment
-                vyaw = (heading_err * 1.0).clamp(-0.40, 0.40)
-
-                # Gentle ramp-up over first 10 steps
-                if step < 10:
-                    ramp = 0.5 + 0.5 * (step / 10.0)
-                    vx = vx * ramp
-                    vy = vy * ramp
-                    vyaw = vyaw * ramp
+                # CARRY mode: pure lateral + forward, NO rotation
+                # Robot keeps its current heading, walks sideways/forward to target
+                vx = (dx_body * 0.8).clamp(-0.40, 0.40)
+                vy = (dy_body * 1.2).clamp(-0.40, 0.40)  # Faster lateral
+                vyaw = torch.zeros_like(vx)  # NO rotation — keep current heading
             else:
                 # NORMAL mode: full velocities (no load, arm just raised)
                 vx = (dx_body * 1.0).clamp(-0.40, 0.40)
@@ -1334,9 +1286,9 @@ class SkillExecutor:
         hold_yaw = get_yaw_from_quat(root_quat).clone()
 
         # Gradually interpolate target from current to final over ramp_steps
-        # This prevents the arm policy from overshooting and oscillating
-        ramp_steps = 80
-        total_steps = 100
+        # Short duration to avoid visual noise from arm oscillation
+        ramp_steps = 30
+        total_steps = 40
 
         for step in range(total_steps):
             if not self._is_running():
