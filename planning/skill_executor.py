@@ -430,9 +430,9 @@ class SkillExecutor:
         # Fix: rotate in-place to face the target BEFORE starting the carry walk.
         if carrying:
             import math as _math_yaw
-            YAW_THRESH = _math_yaw.radians(8)   # 8° tolerance — good enough
-            YAW_MAX_STEPS = 150                  # ~3s at 50Hz
-            YAW_RATE = 0.25                      # gentle rotation speed
+            YAW_THRESH = _math_yaw.radians(10)  # 10° tolerance
+            YAW_MAX_STEPS = 400                  # ~8s at 50Hz — enough for 60°+
+            YAW_RATE = 0.60                      # strong rotation speed
 
             root_pos_y = env.robot.data.root_pos_w
             root_quat_y = env.robot.data.root_quat_w
@@ -459,7 +459,7 @@ class SkillExecutor:
                         break
 
                     # Pure yaw command — no forward/lateral
-                    vyaw_corr = (heading_err_y * 0.5).clamp(-YAW_RATE, YAW_RATE)
+                    vyaw_corr = (heading_err_y * 1.5).clamp(-YAW_RATE, YAW_RATE)
                     yaw_cmd = torch.zeros(env.num_envs, 3, device=self.device)
                     yaw_cmd[:, 2] = vyaw_corr
                     yaw_cmd = torch.where(self.env_active.unsqueeze(-1), yaw_cmd, self._stand_cmd)
@@ -535,11 +535,11 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
 
             if carrying:
-                # CARRY mode: pure lateral + forward, NO rotation
-                # Robot keeps its current heading, walks sideways/forward to target
+                # CARRY mode: forward + lateral + GENTLE yaw correction
+                # Robot slowly corrects heading toward target while walking
                 vx = (dx_body * 0.8).clamp(-0.40, 0.40)
                 vy = (dy_body * 1.2).clamp(-0.40, 0.40)  # Faster lateral
-                vyaw = torch.zeros_like(vx)  # NO rotation — keep current heading
+                vyaw = (heading_err * 0.3).clamp(-0.15, 0.15)  # Gentle yaw correction
             else:
                 # NORMAL mode: full velocities (no load, arm just raised)
                 vx = (dx_body * 1.0).clamp(-0.40, 0.40)
