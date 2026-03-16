@@ -1410,11 +1410,11 @@ class SkillExecutor:
         # Start position (current EE in body frame)
         lower_body_start = ee_body.clone()
 
-        # Final forward-down body-frame target (toward basket/table)
-        # Z=0.0 → EE at root height (~0.77m), just above table surface (0.69m)
-        # X=0.35 → forward reach, Y=-0.15 → slightly right (arm workspace)
+        # Final forward-down body-frame target (toward basket center)
+        # Z=-0.05 → EE slightly below root (~0.72m), just above table surface (0.69m)
+        # X=0.42 → reach deep into basket center, Y=-0.12 → right arm workspace
         lower_body_final = torch.tensor(
-            [[0.35, -0.15, 0.0]], dtype=torch.float32, device=self.device,
+            [[0.42, -0.12, -0.05]], dtype=torch.float32, device=self.device,
         ).expand(env.num_envs, -1)
 
         print(f"  [Lower] Start EE body:  [{ee_body[0,0]:.3f}, {ee_body[0,1]:.3f}, {ee_body[0,2]:.3f}]")
