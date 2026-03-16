@@ -73,6 +73,10 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
+# Auto-enable cameras when recording (required for offscreen rendering in headless)
+if args_cli.record and hasattr(args_cli, 'enable_cameras'):
+    args_cli.enable_cameras = True
+
 # Launch the simulator
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -93,44 +97,133 @@ import isaaclab.sim as sim_utils
 
 
 # ============================================================================
-# Video Recorder (Yöntem C: viewport frame capture → ffmpeg merge)
+# Video Recorder + Camera Tracker (offscreen rendering via replicator)
 # ============================================================================
-class VideoRecorder:
-    """Captures viewport frames at target FPS, then merges with ffmpeg."""
 
-    def __init__(self, output_dir: str, fps: int = 25, control_dt: float = 0.02):
+def _find_ffmpeg() -> str:
+    """Find ffmpeg binary — checks PATH then WinGet packages."""
+    import shutil as _sh
+    import glob as _gl
+    ffmpeg_bin = _sh.which("ffmpeg")
+    if ffmpeg_bin is None:
+        pattern = os.path.expanduser(
+            "~/AppData/Local/Microsoft/WinGet/Packages/*/ffmpeg*/bin/ffmpeg.exe"
+        )
+        candidates = _gl.glob(pattern)
+        if candidates:
+            ffmpeg_bin = candidates[0]
+    return ffmpeg_bin or "ffmpeg"
+
+
+class VideoRecorder:
+    """Captures RGB frames from an offscreen USD camera via replicator.
+
+    Works in both GUI and headless mode (no viewport dependency).
+    Creates a UsdGeom.Camera prim and uses rep.create.render_product
+    + rgb annotator to capture frames.
+    """
+
+    def __init__(self, output_dir: str, fps: int = 25, control_dt: float = 0.02,
+                 width: int = 1280, height: int = 720):
         self.output_dir = output_dir
         self.fps = fps
+        self.width = width
+        self.height = height
         self.frame_dir = os.path.join(output_dir, "frames")
         os.makedirs(self.frame_dir, exist_ok=True)
         self.frame_count = 0
         self._sim_step = 0
-        # Capture every N-th env.step() call to achieve target FPS
-        # env.step() runs at 1/control_dt Hz (e.g., 50Hz), target is fps (e.g., 25)
         self._capture_interval = max(1, int(1.0 / (control_dt * fps)))
 
-        from omni.kit.viewport.utility import get_active_viewport
-        self.viewport = get_active_viewport()
-        print(f"[VIDEO] Recorder initialized: {fps} FPS, "
+        # Create USD camera prim
+        import omni.usd
+        from pxr import UsdGeom, Sdf, Gf
+        stage = omni.usd.get_context().get_stage()
+        cam_path = "/World/RecordCamera"
+        self._cam_prim = stage.DefinePrim(cam_path, "Camera")
+        cam = UsdGeom.Camera(self._cam_prim)
+        cam.GetFocalLengthAttr().Set(24.0)
+        cam.GetHorizontalApertureAttr().Set(20.955)
+        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
+
+        # Create render product + annotator
+        import omni.replicator.core as rep
+        self._rp = rep.create.render_product(cam_path, (width, height))
+        self._rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
+        self._rgb_annot.attach([self._rp])
+
+        self._cam_xformable = UsdGeom.Xformable(self._cam_prim)
+        # Clear any existing xform ops and create a single transform op
+        self._cam_xformable.ClearXformOpOrder()
+        self._xform_op = self._cam_xformable.AddTransformOp()
+
+        print(f"[VIDEO] Recorder initialized: {fps} FPS, {width}x{height}, "
               f"capture every {self._capture_interval} sim steps, "
               f"frames -> {self.frame_dir}")
+
+    def set_camera_pose(self, eye: tuple, target: tuple):
+        """Update the offscreen camera position and look-at target."""
+        import math
+        from pxr import Gf
+
+        ex, ey, ez = eye
+        tx, ty, tz = target
+
+        # Forward vector (camera looks at -Z in USD convention)
+        fwd = Gf.Vec3d(tx - ex, ty - ey, tz - ez)
+        fwd_len = fwd.GetLength()
+        if fwd_len < 1e-6:
+            return
+        fwd = fwd / fwd_len
+
+        # Right = fwd x world_up (Z-up)
+        world_up = Gf.Vec3d(0, 0, 1)
+        right = fwd ^ world_up  # cross product
+        right_len = right.GetLength()
+        if right_len < 1e-6:
+            right = Gf.Vec3d(1, 0, 0)
+        else:
+            right = right / right_len
+
+        # True up = right x fwd
+        up = right ^ fwd
+
+        # USD Camera convention: -Z forward, +X right, +Y up
+        # Build a 4x4 matrix: columns are right, up, -fwd, translate
+        m = Gf.Matrix4d()
+        m.SetIdentity()
+        m[0][0], m[0][1], m[0][2] = right[0], up[0], -fwd[0]
+        m[1][0], m[1][1], m[1][2] = right[1], up[1], -fwd[1]
+        m[2][0], m[2][1], m[2][2] = right[2], up[2], -fwd[2]
+        m[3][0], m[3][1], m[3][2] = 0, 0, 0
+        m[0][3], m[1][3], m[2][3] = ex, ey, ez
+        m[3][3] = 1.0
+
+        self._xform_op.Set(m)
 
     def on_step(self):
         """Call after every sim step. Captures frame at correct interval."""
         self._sim_step += 1
         if self._sim_step % self._capture_interval == 0:
-            from omni.kit.viewport.utility import capture_viewport_to_file
-            frame_path = os.path.join(
-                self.frame_dir, f"frame_{self.frame_count:06d}.png"
-            )
-            capture_viewport_to_file(self.viewport, frame_path)
-            self.frame_count += 1
+            data = self._rgb_annot.get_data()
+            if data is not None and data.size > 0:
+                import numpy as np
+                from PIL import Image
+                # Annotator returns RGBA or RGB — take first 3 channels
+                if len(data.shape) == 3 and data.shape[2] >= 3:
+                    rgb = data[:, :, :3]
+                else:
+                    rgb = data
+                img = Image.fromarray(rgb.astype(np.uint8))
+                frame_path = os.path.join(
+                    self.frame_dir, f"frame_{self.frame_count:06d}.png"
+                )
+                img.save(frame_path)
+                self.frame_count += 1
 
     def finalize(self, output_name: str = "demo_pickup.mp4"):
         """Merge frames into MP4 with ffmpeg."""
         import subprocess
-        import shutil as _shutil
-        import glob as _glob
 
         if self.frame_count == 0:
             print("[VIDEO] No frames captured!")
@@ -138,19 +231,7 @@ class VideoRecorder:
 
         output_path = os.path.join(self.output_dir, output_name)
         frame_pattern = os.path.join(self.frame_dir, "frame_%06d.png")
-
-        # Find ffmpeg - check PATH first, then common WinGet location
-        ffmpeg_bin = _shutil.which("ffmpeg")
-        if ffmpeg_bin is None:
-            # Search WinGet packages directory
-            winget_pattern = os.path.expanduser(
-                "~/AppData/Local/Microsoft/WinGet/Packages/*/ffmpeg*/bin/ffmpeg.exe"
-            )
-            candidates = _glob.glob(winget_pattern)
-            if candidates:
-                ffmpeg_bin = candidates[0]
-        if ffmpeg_bin is None:
-            ffmpeg_bin = "ffmpeg"  # fallback, will raise FileNotFoundError
+        ffmpeg_bin = _find_ffmpeg()
 
         cmd = [
             ffmpeg_bin, "-y",
@@ -167,7 +248,6 @@ class VideoRecorder:
         try:
             subprocess.run(cmd, check=True, capture_output=True)
             print(f"[VIDEO] Saved: {output_path}")
-
             import shutil
             shutil.rmtree(self.frame_dir)
             print(f"[VIDEO] Cleaned up frames")
@@ -175,37 +255,34 @@ class VideoRecorder:
         except subprocess.CalledProcessError as e:
             print(f"[VIDEO] ffmpeg error: {e.stderr.decode()[:500]}")
             print(f"[VIDEO] Frames saved in: {self.frame_dir}")
-            print(f"[VIDEO] Manual merge: ffmpeg -framerate {self.fps} "
-                  f"-i {frame_pattern} -c:v libx264 -pix_fmt yuv420p {output_path}")
             return None
         except FileNotFoundError:
-            print(f"[VIDEO] ffmpeg not found! Install: pip install ffmpeg-python or system ffmpeg")
+            print(f"[VIDEO] ffmpeg not found!")
             print(f"[VIDEO] Frames saved in: {self.frame_dir}")
-            print(f"[VIDEO] Manual merge: ffmpeg -framerate {self.fps} "
-                  f"-i {frame_pattern} -c:v libx264 -pix_fmt yuv420p {output_path}")
             return None
 
 
 class CameraTracker:
     """Tracks robot with body-frame camera offset (rotates with robot yaw).
 
-    Camera stays at 45 degrees front-right of right shoulder regardless of
-    robot orientation. Uses EMA smoothing on both position and yaw.
+    Camera stays at 45 degrees front-right regardless of robot orientation.
+    Uses EMA smoothing on both position and yaw.
+    Updates the VideoRecorder's offscreen camera (no viewport dependency).
     """
 
-    # Body-frame offset: 3m at 45deg front-right, shoulder height
-    EYE_RADIUS = 3.0        # Distance from robot in XY plane
-    EYE_ANGLE = -0.785      # -45deg (front-right in body frame: +X fwd, -Y right)
-    EYE_Z = 1.3             # Shoulder height
-    TARGET_FWD = 0.2        # Look-at offset forward (body frame)
-    TARGET_Z = 0.65         # Look-at height (torso center)
+    EYE_RADIUS = 3.0
+    EYE_ANGLE = -0.785      # -45deg front-right
+    EYE_Z = 1.3
+    TARGET_FWD = 0.2
+    TARGET_Z = 0.65
 
-    def __init__(self):
+    def __init__(self, recorder: "VideoRecorder" = None):
+        self._recorder = recorder
         self._smooth_x = 0.0
         self._smooth_y = 0.0
         self._smooth_yaw = 0.0
-        self._alpha_pos = 0.12   # Position smoothing (low = smooth)
-        self._alpha_yaw = 0.06   # Yaw smoothing (even lower = very smooth rotation)
+        self._alpha_pos = 0.12
+        self._alpha_yaw = 0.06
         self._initialized = False
 
     def update(self, robot_pos_w: torch.Tensor, robot_quat_w: torch.Tensor = None):
@@ -214,7 +291,6 @@ class CameraTracker:
         rx = robot_pos_w[0, 0].item()
         ry = robot_pos_w[0, 1].item()
 
-        # Get robot yaw
         if robot_quat_w is not None:
             from high_low_hierarchical_g1.low_level.velocity_command import get_yaw_from_quat
             yaw = get_yaw_from_quat(robot_quat_w)[0].item()
@@ -229,27 +305,32 @@ class CameraTracker:
         else:
             self._smooth_x += self._alpha_pos * (rx - self._smooth_x)
             self._smooth_y += self._alpha_pos * (ry - self._smooth_y)
-            # Smooth yaw with angle wrapping
             dyaw = math.atan2(math.sin(yaw - self._smooth_yaw),
                               math.cos(yaw - self._smooth_yaw))
             self._smooth_yaw += self._alpha_yaw * dyaw
 
-        # Compute eye position in world frame using smoothed yaw
         cam_angle_world = self._smooth_yaw + self.EYE_ANGLE
         eye = (
             self._smooth_x + self.EYE_RADIUS * math.cos(cam_angle_world),
             self._smooth_y + self.EYE_RADIUS * math.sin(cam_angle_world),
             self.EYE_Z,
         )
-        # Look-at target: slightly ahead of robot in body frame
         target = (
             self._smooth_x + self.TARGET_FWD * math.cos(self._smooth_yaw),
             self._smooth_y + self.TARGET_FWD * math.sin(self._smooth_yaw),
             self.TARGET_Z,
         )
 
-        from isaacsim.core.utils.viewports import set_camera_view
-        set_camera_view(eye=eye, target=target)
+        # Update offscreen camera transform
+        if self._recorder is not None:
+            self._recorder.set_camera_pose(eye, target)
+
+        # Also update viewport camera if available (GUI mode)
+        try:
+            from isaacsim.core.utils.viewports import set_camera_view
+            set_camera_view(eye=eye, target=target)
+        except Exception:
+            pass
 
 
 def _wrap_env_for_recording(env, recorder: VideoRecorder = None,
@@ -371,7 +452,6 @@ def main():
     # ------------------------------------------------------------------
     # 2b. Camera tracking + video recording
     # ------------------------------------------------------------------
-    camera_tracker = CameraTracker()
     recorder = None
     if args_cli.record:
         print("\n[Demo] Setting up video recording...")
@@ -380,6 +460,7 @@ def main():
             fps=args_cli.record_fps,
             control_dt=CONTROL_DT,
         )
+    camera_tracker = CameraTracker(recorder=recorder)
     _wrap_env_for_recording(env, recorder=recorder, camera_tracker=camera_tracker)
 
     # ------------------------------------------------------------------
