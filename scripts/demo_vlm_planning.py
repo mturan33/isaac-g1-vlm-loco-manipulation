@@ -168,6 +168,23 @@ class VideoRecorder:
         frame_pattern = os.path.join(self.frame_dir, "frame_%06d.png")
         ffmpeg_bin = _find_ffmpeg()
 
+        # Wait for all async frame captures to flush to disk
+        # capture_viewport_to_file is async — frames may not be written yet
+        import time as _time_flush
+        last_frame = os.path.join(self.frame_dir, f"frame_{self.frame_count - 1:06d}.png")
+        print(f"[VIDEO] Waiting for {self.frame_count} frames to flush to disk...")
+        for _wait in range(60):  # up to 30 seconds
+            if os.path.exists(last_frame) and os.path.getsize(last_frame) > 0:
+                break
+            _time_flush.sleep(0.5)
+        else:
+            print(f"[VIDEO] WARNING: Last frame not found after 30s, proceeding anyway")
+        # Extra settle to ensure all frames are fully written
+        _time_flush.sleep(2.0)
+        # Count actual frames on disk
+        actual_frames = len([f for f in os.listdir(self.frame_dir) if f.endswith('.png')])
+        print(f"[VIDEO] Frames on disk: {actual_frames}/{self.frame_count}")
+
         cmd = [
             ffmpeg_bin, "-y",
             "-framerate", str(self.fps),
@@ -178,7 +195,7 @@ class VideoRecorder:
             output_path,
         ]
 
-        print(f"\n[VIDEO] Converting {self.frame_count} frames to MP4...")
+        print(f"[VIDEO] Converting {actual_frames} frames to MP4...")
         print(f"[VIDEO] ffmpeg: {ffmpeg_bin}")
         print(f"[VIDEO] Command: {' '.join(cmd)}")
         try:
