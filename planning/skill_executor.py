@@ -643,14 +643,26 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
 
             if carrying:
-                # CARRY mode: heading-aligned velocity controller
-                # vx scaled by cos(heading_err) → only walk forward when aimed at target
-                # Combined with periodic stop-turn-walk for drift correction
-                speed_scale = (dist_per_env / 1.5).clamp(0.20, 1.0)  # decelerate within 1.5m
-                heading_alignment = torch.cos(heading_err).clamp(min=0.0)  # 0@90°, 1@0°
-                vx = (dx_body * 0.8 * speed_scale * heading_alignment).clamp(-0.40, 0.40)
-                vy = (dy_body * 1.0 * speed_scale).clamp(-0.35, 0.35)
-                vyaw = (heading_err * 0.8).clamp(-0.35, 0.35)  # Strong yaw tracking
+                # Check if lateral-only mode (target at same X as robot)
+                _is_lateral = abs(delta[:, 0].mean().item()) < 0.20
+
+                if _is_lateral:
+                    # LATERAL CARRY mode: maintain heading, pure strafe
+                    # Robot keeps facing forward (toward table), just slides sideways
+                    # No vyaw — don't try to face the lateral target
+                    speed_scale = (dist_per_env / 0.6).clamp(0.25, 1.0)
+                    vx = (dx_body * 0.3).clamp(-0.15, 0.15)   # small X correction only
+                    vy = (dy_body * 1.5 * speed_scale).clamp(-0.40, 0.40)  # strong lateral
+                    vyaw = torch.zeros_like(heading_err)  # NO rotation — keep heading
+                    heading_alignment = torch.ones_like(heading_err)  # dummy for logging
+                else:
+                    # FORWARD CARRY mode: heading-aligned velocity controller
+                    # vx scaled by cos(heading_err) → only walk forward when aimed at target
+                    speed_scale = (dist_per_env / 1.5).clamp(0.20, 1.0)
+                    heading_alignment = torch.cos(heading_err).clamp(min=0.0)
+                    vx = (dx_body * 0.8 * speed_scale * heading_alignment).clamp(-0.40, 0.40)
+                    vy = (dy_body * 1.0 * speed_scale).clamp(-0.35, 0.35)
+                    vyaw = (heading_err * 0.8).clamp(-0.35, 0.35)
             else:
                 # NORMAL mode: full velocities (no load, arm just raised)
                 vx = (dx_body * 1.0).clamp(-0.40, 0.40)
