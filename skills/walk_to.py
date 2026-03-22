@@ -146,7 +146,7 @@ class WalkToSkill(BaseSkill):
 
         # Filter out fallen robots from distance calculation
         # Fallen robots have random/drifted positions that corrupt the mean
-        standing_mask = base_height.squeeze() > MIN_BASE_HEIGHT
+        standing_mask = (base_height > MIN_BASE_HEIGHT).view(-1)
         if standing_mask.any():
             effective_dist = distance[standing_mask].mean().item()
         else:
