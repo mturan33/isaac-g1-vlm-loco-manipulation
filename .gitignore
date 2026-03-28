@@ -182,3 +182,4 @@ cython_debug/
 /.claude
 /perception/perception-module-python
 PROJECT_STATUS.md
+TODO.md
