@@ -426,7 +426,8 @@ def main():
             fps=args_cli.record_fps,
             control_dt=CONTROL_DT,
         )
-    camera_tracker = CameraTracker(recorder=recorder)
+    # Camera tracker only in GUI mode (headless has no viewport)
+    camera_tracker = None if args_cli.headless else CameraTracker(recorder=recorder)
     _wrap_env_for_recording(env, recorder=recorder, camera_tracker=camera_tracker)
 
     # ------------------------------------------------------------------
