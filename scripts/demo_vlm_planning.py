@@ -392,15 +392,15 @@ def main():
         ),
     )
     sim = sim_utils.SimulationContext(sim_cfg)
-    # Initial camera view — will be overridden by CameraTracker after first step
-    # Robot spawns at (0,0) facing +X. 45deg front-right in body frame = world (2.1, -2.1)
-    import math as _m
-    _cam_ang = 0.0 + CameraTracker.EYE_ANGLE  # yaw=0 at spawn
-    sim.set_camera_view(
-        eye=[CameraTracker.EYE_RADIUS * _m.cos(_cam_ang),
-             CameraTracker.EYE_RADIUS * _m.sin(_cam_ang), CameraTracker.EYE_Z],
-        target=[CameraTracker.TARGET_FWD, 0.0, CameraTracker.TARGET_Z],
-    )
+    if not args_cli.headless:
+        # Initial camera view — will be overridden by CameraTracker after first step
+        import math as _m
+        _cam_ang = 0.0 + CameraTracker.EYE_ANGLE
+        sim.set_camera_view(
+            eye=[CameraTracker.EYE_RADIUS * _m.cos(_cam_ang),
+                 CameraTracker.EYE_RADIUS * _m.sin(_cam_ang), CameraTracker.EYE_Z],
+            target=[CameraTracker.TARGET_FWD, 0.0, CameraTracker.TARGET_Z],
+        )
 
     # ------------------------------------------------------------------
     # 2. Create hierarchical environment
