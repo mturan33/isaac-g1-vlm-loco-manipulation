@@ -116,8 +116,21 @@ class OllamaVLMPlanner:
         self.stream_reasoning = stream_reasoning
 
         try:
-            import ollama as _ollama
-            self._ollama = _ollama
+            # Fix: Isaac Sim sets SSL_CERT_FILE to a non-existent path,
+            # which causes httpx (used by ollama) to fail. Remove it so
+            # Python's default SSL context is used instead.
+            import os
+            _ssl_cert = os.environ.pop("SSL_CERT_FILE", None)
+            _ssl_cert_dir = os.environ.pop("SSL_CERT_DIR", None)
+            try:
+                import ollama as _ollama
+                self._ollama = _ollama
+            finally:
+                # Restore if they existed
+                if _ssl_cert is not None:
+                    os.environ["SSL_CERT_FILE"] = _ssl_cert
+                if _ssl_cert_dir is not None:
+                    os.environ["SSL_CERT_DIR"] = _ssl_cert_dir
         except ImportError:
             print("[VLMPlanner] ERROR: 'ollama' package not installed. Run: pip install ollama")
             self._ollama = None

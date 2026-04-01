@@ -108,20 +108,24 @@ class PurePursuitController:
         dy_body: float,
         dist: float,
         direction: str = "right",
+        heading_error: float = 0.0,
     ) -> tuple[float, float, float]:
-        """Lateral strafe walk — PP rotated 90°, vyaw=0.
+        """Lateral strafe walk — PP rotated 90° with heading hold.
 
-        The robot keeps its heading (facing table) and slides sideways.
+        The robot maintains its heading (facing table) and slides sideways.
         PP's "forward" axis is mapped to the robot's lateral axis.
+        A heading hold P-controller corrects yaw drift during strafe.
 
         Args:
             dx_body: target X in body frame
             dy_body: target Y in body frame
             dist: Euclidean distance to target
             direction: "right" (dy_body < 0) or "left" (dy_body > 0)
+            heading_error: current_yaw - initial_yaw (radians), used
+                for active heading hold during lateral walk
 
         Returns:
-            (vx, vy, vyaw) velocity commands — vyaw is always 0
+            (vx, vy, vyaw) velocity commands
         """
         # Guard: very close — just stop
         if dist < 0.02:
@@ -162,7 +166,12 @@ class PurePursuitController:
         vy = max(-self.max_vy, min(self.max_vy, vy))
         vx = max(-0.15, min(0.15, vx))
 
-        return vx, vy, 0.0  # vyaw always 0 for lateral walk
+        # Heading hold: P-controller to counteract yaw drift during strafe
+        # heading_error > 0 means robot turned CCW → need CW correction (vyaw < 0)
+        vyaw = -2.5 * heading_error
+        vyaw = max(-0.35, min(0.35, vyaw))
+
+        return vx, vy, vyaw
 
 
 class SkillExecutor:
@@ -744,6 +753,9 @@ class SkillExecutor:
 
         total_extra_steps = 0
 
+        # Record initial heading for lateral walk heading hold
+        _initial_yaw = get_yaw_from_quat(env.robot.data.root_quat_w)[0]
+
         for step in range(max_steps):
             if not self._is_running():
                 break
@@ -812,10 +824,13 @@ class SkillExecutor:
                 _is_lateral = abs(delta[:, 0].mean().item()) < 0.20
 
                 if _is_lateral:
-                    # LATERAL CARRY mode: PP rotated 90°, vyaw=0
+                    # LATERAL CARRY mode: PP rotated 90° with heading hold
                     direction = "right" if _dy_b < 0 else "left"
+                    # Heading hold: error = current_yaw - initial_yaw
+                    _yaw_drift = normalize_angle(yaw[0] - _initial_yaw).item()
                     _vx, _vy, _vyaw = pp_lateral.compute_lateral(
-                        _dx_b, _dy_b, _dist, direction=direction)
+                        _dx_b, _dy_b, _dist, direction=direction,
+                        heading_error=_yaw_drift)
                     heading_alignment = torch.ones_like(heading_err)  # dummy for logging
                 else:
                     # FORWARD CARRY mode: PP normal with conservative params
@@ -854,11 +869,12 @@ class SkillExecutor:
                 herr_deg = f"{heading_err[0].item() * 57.3:.1f}" if step > 0 else "?"
                 halign = f"{heading_alignment[0].item():.2f}" if carrying else "-"
                 _mode = "lateral-PP" if (carrying and abs(delta[:, 0].mean().item()) < 0.20) else ("carry-PP" if carrying else "normal-PP")
+                _ydrift = normalize_angle(yaw[0] - _initial_yaw).item() * 57.3
                 print(
                     f"  [OmniWalk] Step {step} | dist={effective_dist:.2f}m "
                     f"[{per_env}] | h={h:.2f} | "
                     f"stand={stand_count}/{env.num_envs} | reached={reached_count} | "
-                    f"herr={herr_deg}deg align={halign} | "
+                    f"herr={herr_deg}deg align={halign} ydrift={_ydrift:.1f}deg | "
                     f"cmd=[{vel_cmd[0,0]:.2f},{vel_cmd[0,1]:.2f},{vel_cmd[0,2]:.2f}] | "
                     f"mode={_mode}"
                 )
