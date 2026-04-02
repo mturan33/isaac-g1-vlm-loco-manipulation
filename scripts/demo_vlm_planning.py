@@ -453,6 +453,17 @@ def main():
     print("=" * 60)
 
     # ------------------------------------------------------------------
+    # 0. Pre-load VLM model (parallel with Isaac Sim startup)
+    # ------------------------------------------------------------------
+    vlm = None
+    if args_cli.planner == "vlm":
+        vlm = OllamaVLMPlanner(
+            model=args_cli.vlm_model,
+            stream_reasoning=not args_cli.no_stream,
+        )
+        vlm.preload_model()
+
+    # ------------------------------------------------------------------
     # 1. Create simulation context
     # ------------------------------------------------------------------
     sim_cfg = sim_utils.SimulationCfg(
@@ -544,12 +555,8 @@ def main():
     plan = None
     vlm_fallback = False
 
-    if args_cli.planner == "vlm":
-        print(f"[Demo] Using VLM planner ({args_cli.vlm_model})...")
-        vlm = OllamaVLMPlanner(
-            model=args_cli.vlm_model,
-            stream_reasoning=not args_cli.no_stream,
-        )
+    if args_cli.planner == "vlm" and vlm is not None:
+        print(f"[Demo] Using VLM planner ({args_cli.vlm_model}, model pre-loaded)...")
         plan = vlm.plan(args_cli.task, world_json)
 
         if plan is None:

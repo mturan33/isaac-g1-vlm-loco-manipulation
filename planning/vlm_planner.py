@@ -111,9 +111,11 @@ class OllamaVLMPlanner:
         self,
         model: str = "qwen3-vl:4b",
         stream_reasoning: bool = True,
+        keep_alive: str = "10m",
     ):
         self.model = model
         self.stream_reasoning = stream_reasoning
+        self.keep_alive = keep_alive
 
         try:
             # Fix: Isaac Sim sets SSL_CERT_FILE to a non-existent path,
@@ -134,6 +136,28 @@ class OllamaVLMPlanner:
         except ImportError:
             print("[VLMPlanner] ERROR: 'ollama' package not installed. Run: pip install ollama")
             self._ollama = None
+
+    def preload_model(self):
+        """Pre-load model into VRAM so inference is fast (no cold start).
+
+        Call this early (e.g. while Isaac Sim is loading) so the model
+        is already warm when plan() is called.
+        """
+        if self._ollama is None:
+            return
+        try:
+            t0 = time.time()
+            print(f"[VLM] Pre-loading {self.model} into VRAM...", file=sys.stderr)
+            # A minimal chat with keep_alive loads the model into GPU memory
+            self._ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": "hi"}],
+                keep_alive=self.keep_alive,
+            )
+            print(f"[VLM] Model loaded in {time.time() - t0:.1f}s (keep_alive={self.keep_alive})",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"[VLM] Pre-load failed: {e}", file=sys.stderr)
 
     def plan(
         self,
@@ -168,20 +192,17 @@ class OllamaVLMPlanner:
                 for i, step in enumerate(plan):
                     params_str = ", ".join(f"{k}={v}" for k, v in step.get("params", {}).items())
                     print(f"  {i+1}. {step['skill']}({params_str})", file=sys.stderr)
-                self._unload_model()
                 return plan
             else:
                 print("[VLM] Plan validation failed", file=sys.stderr)
-                self._unload_model()
                 return None
 
         except Exception as e:
             print(f"[VLM] Error: {e}", file=sys.stderr)
-            self._unload_model()
             return None
 
-    def _unload_model(self):
-        """Unload model from GPU to free VRAM for Isaac Sim."""
+    def unload_model(self):
+        """Unload model from GPU to free VRAM. Call at end of demo."""
         try:
             self._ollama.chat(
                 model=self.model,
@@ -247,6 +268,7 @@ Now generate the plan for the task above. Output ONLY the JSON object, nothing e
                 model=self.model,
                 messages=patched_messages,
                 stream=True,
+                keep_alive=self.keep_alive,
             ):
                 token = chunk['message']['content']
                 full_response += token
@@ -277,6 +299,7 @@ Now generate the plan for the task above. Output ONLY the JSON object, nothing e
             resp = self._ollama.chat(
                 model=self.model,
                 messages=patched_messages,
+                keep_alive=self.keep_alive,
             )
             full_response = resp.message.content
 
@@ -286,6 +309,7 @@ Now generate the plan for the task above. Output ONLY the JSON object, nothing e
             resp = self._ollama.chat(
                 model=self.model,
                 messages=patched_messages,
+                keep_alive=self.keep_alive,
             )
             full_response = resp.message.content
 
