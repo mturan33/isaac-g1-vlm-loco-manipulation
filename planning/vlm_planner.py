@@ -193,13 +193,31 @@ class OllamaVLMPlanner:
             pass  # Best effort
 
     def _build_messages(self, task: str, semantic_map: dict, image_path: Optional[str]) -> list:
-        """Build chat messages with system prompt + user context."""
-        user_content = f"""CURRENT WORLD STATE:
-{json.dumps(semantic_map, indent=2)}
+        """Build chat messages with few-shot example for reliable JSON output."""
+        # Compact world state (reduce token count for small models)
+        objects = semantic_map.get("objects", [])
+        surfaces = semantic_map.get("surfaces", [])
+        obj_list = ", ".join(f'{o["id"]}({o["class"]})' for o in objects)
+        surf_list = ", ".join(
+            f'{s["id"]}({s["class"]}, basket={s.get("has_basket", False)})'
+            for s in surfaces
+        )
 
-TASK: {task}
+        user_content = f"""You are a robot task planner. Output ONLY a JSON plan.
 
-Generate the skill plan as JSON."""
+Skills: pre_reach(target), walk_to(target, stop_distance, hold_arm), reach(target), grasp(), lift(), lower(), place()
+
+Standard pick-and-place sequence:
+pre_reach -> walk_to(object, 0.4, true) -> reach -> grasp -> lift -> walk_to(surface, 0.2, true) -> lower -> place
+
+Objects: {obj_list}
+Surfaces: {surf_list}
+Task: {task}
+
+Example output:
+{{"plan": [{{"skill": "pre_reach", "params": {{"target": "object_01"}}}}, {{"skill": "walk_to", "params": {{"target": "object_01", "stop_distance": 0.4, "hold_arm": true}}}}, {{"skill": "reach", "params": {{"target": "object_01"}}}}, {{"skill": "grasp", "params": {{}}}}, {{"skill": "lift", "params": {{}}}}, {{"skill": "walk_to", "params": {{"target": "table_01", "stop_distance": 0.2, "hold_arm": true}}}}, {{"skill": "lower", "params": {{}}}}, {{"skill": "place", "params": {{}}}}]}}
+
+Now generate the plan for the task above. Output ONLY the JSON object, nothing else."""
 
         user_msg = {"role": "user", "content": user_content}
 
@@ -207,10 +225,7 @@ Generate the skill plan as JSON."""
         if image_path is not None:
             user_msg["images"] = [image_path]
 
-        return [
-            {"role": "system", "content": VLM_SYSTEM_PROMPT},
-            user_msg,
-        ]
+        return [user_msg]
 
     def _stream_chat(self, messages: list) -> str:
         """Stream response from Ollama, display reasoning live, return full text."""
@@ -218,23 +233,34 @@ Generate the skill plan as JSON."""
         in_think = False
         think_printed_header = False
 
-        for chunk in self._ollama.chat(model=self.model, messages=messages, stream=True):
-            token = chunk['message']['content']
-            full_response += token
+        # Use format="json" to force JSON output.
+        # Disable Qwen3 thinking by appending /no_think to the last user message
+        # (Qwen3 convention: /no_think suppresses <think> block).
+        patched_messages = []
+        for msg in messages:
+            patched_messages.append(dict(msg))
+        if patched_messages and patched_messages[-1]["role"] == "user":
+            patched_messages[-1]["content"] += "\n/no_think"
 
-            if self.stream_reasoning:
+        if self.stream_reasoning:
+            for chunk in self._ollama.chat(
+                model=self.model,
+                messages=patched_messages,
+                stream=True,
+            ):
+                token = chunk['message']['content']
+                full_response += token
+
                 # Detect <think> blocks (Qwen3 reasoning)
                 if '<think>' in token:
                     in_think = True
                     if not think_printed_header:
                         print("\n\033[90m[VLM Reasoning]\033[0m", file=sys.stderr)
                         think_printed_header = True
-                    # Print remainder after <think> tag
                     after = token.split('<think>', 1)[1]
                     if after:
                         print(f"\033[90m{after}\033[0m", end='', flush=True, file=sys.stderr)
                 elif '</think>' in token:
-                    # Print text before </think>
                     before = token.split('</think>', 1)[0]
                     if before:
                         print(f"\033[90m{before}\033[0m", end='', flush=True, file=sys.stderr)
@@ -242,6 +268,26 @@ Generate the skill plan as JSON."""
                     print(f"\n\033[92m[VLM Plan Output]\033[0m", file=sys.stderr)
                 elif in_think:
                     print(f"\033[90m{token}\033[0m", end='', flush=True, file=sys.stderr)
+                elif not in_think and token.strip():
+                    print(f"\033[92m{token}\033[0m", end='', flush=True, file=sys.stderr)
+
+            print("", file=sys.stderr)  # newline after streaming
+        else:
+            # Non-streaming mode
+            resp = self._ollama.chat(
+                model=self.model,
+                messages=patched_messages,
+            )
+            full_response = resp.message.content
+
+        # Fallback: if streaming returned empty, retry non-streaming
+        if not full_response.strip():
+            print("[VLM] Streaming returned empty, retrying non-streaming...", file=sys.stderr)
+            resp = self._ollama.chat(
+                model=self.model,
+                messages=patched_messages,
+            )
+            full_response = resp.message.content
 
         return full_response
 
@@ -249,6 +295,9 @@ Generate the skill plan as JSON."""
         """Parse JSON plan from VLM response (handles <think> blocks)."""
         # Remove <think>...</think> blocks
         clean = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+        # Debug: log response summary
+        print(f"[VLM] Response: {len(text)} chars raw, {len(clean)} chars clean", file=sys.stderr)
 
         # Try to find JSON object
         # Method 1: Direct parse

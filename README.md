@@ -138,10 +138,10 @@ The walk controller uses **Pure Pursuit** with two modes:
 |------|----------|----|----|------|-------------|
 | **Normal** | Walk to object | 0.40 | 0.20 | 0.35 | 0.5 m |
 | **Carry** | Forward carry walk | 0.30 | 0.40 | 0.25 | 0.3 m |
-| **Lateral** | Sideways carry to basket | 0.15 | 0.40 | 0.00 | 0.25 m |
+| **Lateral** | Sideways carry to basket | 0.15 | 0.40 | hold | 0.25 m |
 
-Lateral mode maintains robot heading (vyaw = 0) and uses pure strafe. Pre-walk yaw
-correction is skipped for lateral-only walks.
+Lateral mode uses a heading-hold P-controller (Kp=2.5, vyaw_max=0.35) to maintain
+robot orientation during strafe. Pre-walk yaw correction is skipped for lateral walks.
 
 ## Installation
 
