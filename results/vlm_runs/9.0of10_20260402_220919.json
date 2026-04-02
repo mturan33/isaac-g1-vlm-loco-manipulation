@@ -1,0 +1,107 @@
+{
+  "score": 9.0,
+  "timestamp": "20260402_220919",
+  "task": "Pick up the steering wheel from the table",
+  "planner": "vlm",
+  "vlm_model": "qwen3-vl:2b",
+  "vlm_plan_used": true,
+  "total_time_s": 76.7,
+  "steps_succeeded": 8,
+  "steps_total": 8,
+  "final_height_m": 0.772,
+  "standing": "1/1",
+  "plan": [
+    {
+      "skill": "pre_reach",
+      "params": {
+        "target": "object_01"
+      }
+    },
+    {
+      "skill": "walk_to",
+      "params": {
+        "target": "object_01",
+        "stop_distance": 0.4,
+        "hold_arm": true
+      }
+    },
+    {
+      "skill": "reach",
+      "params": {
+        "target": "object_01"
+      }
+    },
+    {
+      "skill": "grasp",
+      "params": {}
+    },
+    {
+      "skill": "lift",
+      "params": {}
+    },
+    {
+      "skill": "walk_to",
+      "params": {
+        "target": "table_01",
+        "stop_distance": 0.2,
+        "hold_arm": true
+      }
+    },
+    {
+      "skill": "lower",
+      "params": {}
+    },
+    {
+      "skill": "place",
+      "params": {}
+    }
+  ],
+  "step_results": [
+    {
+      "skill": "pre_reach",
+      "status": "success",
+      "reason": "Arm raised high (EE z=0.950m)"
+    },
+    {
+      "skill": "walk_to",
+      "status": "success",
+      "reason": "1/1 standing envs reached object_01"
+    },
+    {
+      "skill": "reach",
+      "status": "success",
+      "reason": "Reached (best obj dist: 0.204m, attached=True)"
+    },
+    {
+      "skill": "grasp",
+      "status": "success",
+      "reason": "Object attached to hand"
+    },
+    {
+      "skill": "lift",
+      "status": "success",
+      "reason": "Lifted to z=0.977m"
+    },
+    {
+      "skill": "walk_to",
+      "status": "success",
+      "reason": "1/1 standing envs reached table_01"
+    },
+    {
+      "skill": "lower",
+      "status": "success",
+      "reason": "Lowered to z=0.782m"
+    },
+    {
+      "skill": "place",
+      "status": "success",
+      "reason": "Object released, arm returned to default"
+    }
+  ],
+  "scoring_breakdown": {
+    "completion": "8/8 = 5.0/5",
+    "standing": "1/1 = 2.0/2",
+    "speed": "76.7s = 1.0/2",
+    "vlm_plan": "yes = 1.0/1"
+  }
+}
