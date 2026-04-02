@@ -218,7 +218,7 @@ Generate the skill plan as JSON."""
         in_think = False
         think_printed_header = False
 
-        for chunk in self._ollama.chat(model=self.model, messages=messages, stream=True, format="json"):
+        for chunk in self._ollama.chat(model=self.model, messages=messages, stream=True):
             token = chunk['message']['content']
             full_response += token
 
@@ -286,7 +286,7 @@ Generate the skill plan as JSON."""
             except json.JSONDecodeError:
                 pass
 
-        print(f"[VLM] Could not parse JSON from response:\n{clean[:500]}", file=sys.stderr)
+        print(f"[VLM] Could not parse JSON from response (len={len(clean)}):\n{clean[:800]}", file=sys.stderr)
         return None
 
     def _extract_plan(self, data) -> Optional[list]:
