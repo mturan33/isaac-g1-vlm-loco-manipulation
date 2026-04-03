@@ -351,6 +351,47 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    # -- Cabinet with drawer (for drawer-opening task) --
+    # Sektion cabinet: prismatic drawer joints (drawer_top_joint, drawer_bottom_joint)
+    # + revolute door joints (door_left_joint, door_right_joint)
+    # Positioned to robot's left, facing robot so handle is reachable
+    cabinet: ArticulationCfg = ArticulationCfg(
+        prim_path="{ENV_REGEX_NS}/Cabinet",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/drawers/cabinet_collider.usd",
+            activate_contact_sensors=False,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+            ),
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(2.0, 1.5, 0.45),  # Left of table, reachable by robot
+            rot=(0.7071, 0.0, 0.0, -0.7071),  # Face toward robot (handle side)
+            joint_pos={
+                "door_left_joint": 0.0,
+                "door_right_joint": 0.0,
+                "drawer_bottom_joint": 0.0,
+                "drawer_top_joint": 0.0,  # Start closed
+            },
+        ),
+        actuators={
+            "drawers": ImplicitActuatorCfg(
+                joint_names_expr=["drawer_top_joint", "drawer_bottom_joint"],
+                effort_limit_sim=100.0,
+                velocity_limit_sim=100.0,
+                stiffness=0.0,    # Free to slide (robot pulls)
+                damping=5.0,      # Some resistance for realism
+            ),
+            "doors": ImplicitActuatorCfg(
+                joint_names_expr=["door_left_joint", "door_right_joint"],
+                effort_limit_sim=100.0,
+                velocity_limit_sim=100.0,
+                stiffness=10.0,
+                damping=5.0,
+            ),
+        },
+    )
+
     # -- Dome light --
     light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -416,6 +457,7 @@ class HierarchicalG1Env:
         self.robot: Articulation = self.scene["robot"]
         self.table: RigidObject = self.scene["table"]
         self.pickup_obj: RigidObject = self.scene["pickup_object"]
+        self.cabinet: Articulation = self.scene["cabinet"]
 
         # -- Load V6.2 locomotion policy --
         from ..low_level.policy_wrapper import LocomotionPolicy

@@ -228,6 +228,8 @@ class SkillExecutor:
             "lower": self._execute_lower,
             "place": self._execute_place,
             "walk_to_position": self._execute_walk_to_position,
+            "pull": self._execute_pull,
+            "release": self._execute_release,
         }
 
     def _is_running(self) -> bool:
@@ -1740,3 +1742,125 @@ class SkillExecutor:
         self._hold_arm_targets = None
 
         return {"status": "success", "reason": "Object released, arm returned to default"}
+
+    # ================================================================= #
+    # pull: Pull drawer/lever toward robot
+    # ================================================================= #
+    def _execute_pull(self, direction=None, distance: float = 0.25, speed: float = 0.003) -> dict:
+        """Pull attached object toward robot (drawer opening).
+
+        Gradually retracts the right arm shoulder joint to pull
+        the EE (and attached drawer handle) toward the robot.
+
+        Args:
+            direction: [dx, dy, dz] pull direction in body frame (default: [-1, 0, 0] = toward robot)
+            distance: pull distance in meters (default 0.25m)
+            speed: pull speed in m/step (default 0.003 = 3mm/step)
+        """
+        if direction is None:
+            direction = [-1, 0, 0]
+
+        env = self.env
+
+        # Record starting EE position (world frame)
+        ee_world, _ = env._compute_palm_ee()
+        start_ee = ee_world.clone()
+
+        # Hold position (stand still while pulling)
+        root_pos = env.robot.data.root_pos_w
+        hold_pos_xy = root_pos[:, :2].clone()
+        hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
+
+        # Use heuristic arm control — gradually retract arm joints
+        env.enable_arm_policy(False)
+
+        # Get current arm joint positions as starting point
+        current_arm = env.robot.data.joint_pos[:, env._arm_idx].clone()
+        # Right arm joints: indices 7-13 (right shoulder pitch, roll, yaw, elbow, wrist x3)
+        # To pull toward robot: increase shoulder pitch (retract arm)
+        # shoulder_pitch is right_shoulder_pitch_joint (idx 7 in arm array = idx 0 in right arm)
+        right_start = 7  # Right arm starts at index 7 in the 14-joint arm array
+
+        max_steps = int(distance / speed) + 100
+        pulled_dist = 0.0
+
+        for step in range(max_steps):
+            if not self._is_running():
+                break
+
+            # Current EE
+            ee_world, _ = env._compute_palm_ee()
+            pulled_vec = ee_world - start_ee
+            pulled_dist = pulled_vec.norm(dim=-1).mean().item()
+
+            # Gradually retract: modify right shoulder pitch and elbow
+            progress = min((step + 1) * speed / distance, 1.0)
+            target_arm = current_arm.clone()
+            # Shoulder pitch: increase to retract arm (pull back)
+            target_arm[:, right_start + 0] += progress * 0.5   # shoulder_pitch
+            # Elbow: bend more to shorten reach
+            target_arm[:, right_start + 3] += progress * 0.3   # elbow
+
+            env.arm_controller.set_custom_targets(target_arm)
+            arm_targets = env.arm_controller.get_targets()
+
+            # PID hold for standing
+            hold_cmd = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            if isinstance(hold_cmd, tuple):
+                hold_cmd = hold_cmd[0]
+
+            obs = env.step_manipulation(hold_cmd, arm_targets)
+
+            # Check height
+            h = obs["base_height"].mean().item()
+            if h < 0.5:
+                return {"status": "failed", "reason": f"Robot fell during pull (h={h:.2f}m)"}
+
+            # Log progress
+            if step % 30 == 0:
+                print(f"  [Pull] Step {step:3d} | pulled={pulled_dist:.3f}m / {distance:.3f}m | h={h:.2f}")
+
+            # Done?
+            if pulled_dist >= distance * 0.80:
+                print(f"  [Pull] Target reached at step {step}: {pulled_dist:.3f}m")
+                break
+
+        # Stabilize
+        for _ in range(20):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(self._stand_cmd, arm_targets)
+
+        return {
+            "status": "success",
+            "reason": f"Pulled {pulled_dist:.3f}m in {step + 1} steps",
+        }
+
+    # ================================================================= #
+    # release: Detach from drawer/object + return arm to default
+    # ================================================================= #
+    def _execute_release(self) -> dict:
+        """Release magnetic grasp and return arm to default position."""
+        from ..low_level.arm_controller import ArmPose
+
+        env = self.env
+
+        # Detach (magnetic grasp release)
+        env.detach_object()
+
+        # Return arm to default
+        env.enable_arm_policy(False)
+        env.arm_controller.set_pose(ArmPose.DEFAULT)
+        env.finger_controller.open(hand="both")
+
+        for step in range(80):
+            if not self._is_running():
+                break
+            arm_targets = env.arm_controller.get_targets()
+            obs = env.step_manipulation(self._stand_cmd, arm_targets)
+
+        # Switch back to walking mode
+        env.set_manipulation_mode(False)
+        self._hold_arm_targets = None
+
+        return {"status": "success", "reason": "Released and arm returned to default"}

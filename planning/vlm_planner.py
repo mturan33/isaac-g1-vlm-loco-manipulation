@@ -29,6 +29,7 @@ from typing import Optional
 AVAILABLE_SKILLS = {
     "walk_to", "pre_reach", "reach", "grasp", "lift",
     "lateral_walk", "lower", "place", "walk_to_position",
+    "pull", "release",
 }
 
 # ============================================================================
@@ -214,29 +215,41 @@ class OllamaVLMPlanner:
             pass  # Best effort
 
     def _build_messages(self, task: str, semantic_map: dict, image_path: Optional[str]) -> list:
-        """Build chat messages with few-shot example for reliable JSON output."""
+        """Build chat messages with few-shot examples for reliable JSON output."""
         # Compact world state (reduce token count for small models)
         objects = semantic_map.get("objects", [])
         surfaces = semantic_map.get("surfaces", [])
+        interactables = semantic_map.get("interactables", [])
         obj_list = ", ".join(f'{o["id"]}({o["class"]})' for o in objects)
         surf_list = ", ".join(
             f'{s["id"]}({s["class"]}, basket={s.get("has_basket", False)})'
             for s in surfaces
         )
+        ia_list = ", ".join(
+            f'{ia["id"]}({ia["class"]}, state={ia.get("state", "unknown")})'
+            for ia in interactables
+        )
 
         user_content = f"""You are a robot task planner. Output ONLY a JSON plan.
 
-Skills: pre_reach(target), walk_to(target, stop_distance, hold_arm), reach(target), grasp(), lift(), lower(), place()
+Skills: pre_reach(target), walk_to(target, stop_distance, hold_arm), reach(target), grasp(), lift(), lower(), place(), pull(direction, distance), release()
 
-Standard pick-and-place sequence:
+Pick-and-place sequence:
 pre_reach -> walk_to(object, 0.4, true) -> reach -> grasp -> lift -> walk_to(surface, 0.2, true) -> lower -> place
+
+Drawer opening sequence:
+pre_reach -> walk_to(drawer, 0.4, true) -> reach -> grasp -> pull([-1,0,0], 0.25) -> release
 
 Objects: {obj_list}
 Surfaces: {surf_list}
+Interactables: {ia_list if ia_list else "none"}
 Task: {task}
 
-Example output:
+Example 1 (pick-place):
 {{"plan": [{{"skill": "pre_reach", "params": {{"target": "object_01"}}}}, {{"skill": "walk_to", "params": {{"target": "object_01", "stop_distance": 0.4, "hold_arm": true}}}}, {{"skill": "reach", "params": {{"target": "object_01"}}}}, {{"skill": "grasp", "params": {{}}}}, {{"skill": "lift", "params": {{}}}}, {{"skill": "walk_to", "params": {{"target": "table_01", "stop_distance": 0.2, "hold_arm": true}}}}, {{"skill": "lower", "params": {{}}}}, {{"skill": "place", "params": {{}}}}]}}
+
+Example 2 (drawer):
+{{"plan": [{{"skill": "pre_reach", "params": {{"target": "drawer_01"}}}}, {{"skill": "walk_to", "params": {{"target": "drawer_01", "stop_distance": 0.4, "hold_arm": true}}}}, {{"skill": "reach", "params": {{"target": "drawer_01"}}}}, {{"skill": "grasp", "params": {{}}}}, {{"skill": "pull", "params": {{"direction": [-1, 0, 0], "distance": 0.25}}}}, {{"skill": "release", "params": {{}}}}]}}
 
 Now generate the plan for the task above. Output ONLY the JSON object, nothing else."""
 
@@ -425,11 +438,17 @@ class SimplePlanner:
         objects = semantic_map_json.get("objects", [])
         surfaces = semantic_map_json.get("surfaces", [])
 
+        interactables = semantic_map_json.get("interactables", [])
+
         # Detect task type
         is_pick = any(w in task_lower for w in ["pick", "grab", "grasp", "get", "take"])
         is_place = any(w in task_lower for w in ["place", "put", "set", "drop"])
+        is_open = any(w in task_lower for w in ["open", "pull"])
+        is_drawer = any(w in task_lower for w in ["drawer", "cabinet", "çekmece"])
 
-        if is_pick:
+        if is_open and is_drawer:
+            return self._plan_open_drawer(task_lower, interactables)
+        elif is_pick:
             return self._plan_pick(task_lower, objects)
         elif is_place:
             return self._plan_place(task_lower, surfaces)
@@ -512,3 +531,22 @@ class SimplePlanner:
         if surfaces:
             return surfaces[0]
         return None
+
+    def _plan_open_drawer(self, task: str, interactables: list) -> list:
+        """Open drawer: walk -> reach handle -> grasp -> pull -> release."""
+        drawer = None
+        for ia in interactables:
+            if ia.get("class", "") == "drawer":
+                drawer = ia
+                break
+        if drawer is None:
+            print("[SimplePlanner] No drawer found in scene")
+            return []
+        return [
+            {"skill": "pre_reach", "params": {"target": drawer["id"]}},
+            {"skill": "walk_to", "params": {"target": drawer["id"], "stop_distance": 0.40, "hold_arm": True}},
+            {"skill": "reach", "params": {"target": drawer["id"]}},
+            {"skill": "grasp", "params": {}},
+            {"skill": "pull", "params": {"direction": [-1, 0, 0], "distance": 0.25}},
+            {"skill": "release", "params": {}},
+        ]

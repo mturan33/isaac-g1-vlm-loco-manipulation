@@ -43,6 +43,7 @@ class SemanticMap:
         # World state
         self.objects: dict[str, dict] = {}
         self.surfaces: dict[str, dict] = {}
+        self.interactables: dict[str, dict] = {}
         self.robot_state: dict = {}
 
         # Validate
@@ -95,6 +96,51 @@ class SemanticMap:
             "size": [1.5, 0.8, 0.70],  # PackingTable USD approximate dims
             "has_basket": True,  # grey basket on table surface
         }
+
+        # Cabinet with drawer
+        if hasattr(env, 'cabinet'):
+            cab = env.cabinet
+            cab_pos = cab.data.root_pos_w[0].cpu().tolist()
+            # Read drawer joint state
+            joint_pos = cab.data.joint_pos[0].cpu()  # [num_joints]
+            # Find drawer_top_joint index
+            joint_names = cab.joint_names
+            drawer_idx = None
+            for i, name in enumerate(joint_names):
+                if "drawer_top" in name:
+                    drawer_idx = i
+                    break
+            if drawer_idx is not None:
+                drawer_pos_val = joint_pos[drawer_idx].item()
+                max_travel = 0.30  # 30cm max drawer travel
+                open_ratio = min(1.0, max(0.0, drawer_pos_val / max_travel))
+            else:
+                drawer_pos_val = 0.0
+                open_ratio = 0.0
+
+            # Estimate handle position: cabinet pos + offset for handle
+            # Handle is on the front face, at roughly cabinet height + 0.25m
+            handle_pos = [
+                cab_pos[0],
+                cab_pos[1],
+                cab_pos[2] + 0.25,  # Top drawer handle height
+            ]
+
+            cab_dist = math.sqrt(
+                (handle_pos[0] - robot_pos[0]) ** 2
+                + (handle_pos[1] - robot_pos[1]) ** 2
+            )
+
+            self.interactables["drawer_01"] = {
+                "id": "drawer_01",
+                "class": "drawer",
+                "position_3d": handle_pos,
+                "handle_position": handle_pos,
+                "open_ratio": round(open_ratio, 2),
+                "state": "open" if open_ratio > 0.3 else "closed",
+                "interaction": "pull",
+                "distance_to_robot": round(cab_dist, 3),
+            }
 
     # ------------------------------------------------------------------
     # Perception mode (camera-based -- stub)
@@ -161,11 +207,14 @@ class SemanticMap:
     # ------------------------------------------------------------------
     def get_json(self) -> dict:
         """Return standardized world state for VLM planner."""
-        return {
+        state = {
             "robot": self.robot_state,
             "objects": list(self.objects.values()),
             "surfaces": list(self.surfaces.values()),
         }
+        if self.interactables:
+            state["interactables"] = list(self.interactables.values())
+        return state
 
     # ------------------------------------------------------------------
     # Position queries (for skill executor)
@@ -190,12 +239,25 @@ class SemanticMap:
             return None
         return surf["position_3d"]
 
+    def get_interactable_position(self, interactable_id: str) -> Optional[list]:
+        """Get real-time 3D position of an interactable (e.g. drawer handle)."""
+        ia = self.interactables.get(interactable_id)
+        if ia is None:
+            for iid, idata in self.interactables.items():
+                if idata["class"] in interactable_id or interactable_id in idata["class"]:
+                    return idata.get("handle_position", idata["position_3d"])
+            return None
+        return ia.get("handle_position", ia["position_3d"])
+
     def get_position(self, target_id: str) -> Optional[list]:
-        """Get position of any object or surface by id."""
+        """Get position of any object, surface, or interactable by id."""
         pos = self.get_object_position(target_id)
         if pos is not None:
             return pos
-        return self.get_surface_position(target_id)
+        pos = self.get_surface_position(target_id)
+        if pos is not None:
+            return pos
+        return self.get_interactable_position(target_id)
 
     def get_per_env_position(self, target_id: str) -> Optional[torch.Tensor]:
         """Get per-env world position tensor [num_envs, 3] from sim."""
@@ -215,6 +277,7 @@ class SemanticMap:
         id_map = {
             "object_01": env.pickup_obj,
             "table_01": env.table,
+            "drawer_01": env.cabinet if hasattr(env, 'cabinet') else None,
         }
         if target_id in id_map:
             return id_map[target_id]
@@ -224,6 +287,8 @@ class SemanticMap:
             "steering_wheel": env.pickup_obj,
             "object": env.pickup_obj,
             "table": env.table,
+            "drawer": env.cabinet if hasattr(env, 'cabinet') else None,
+            "cabinet": env.cabinet if hasattr(env, 'cabinet') else None,
         }
         for class_name, entity in class_map.items():
             if class_name in target_id or target_id in class_name:
