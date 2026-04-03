@@ -1,4 +1,4 @@
-# Hierarchical RL Pick-and-Place for G1 Humanoid
+# Hierarchical VLM-RL Pick-and-Place for G1 Humanoid
 
 End-to-end autonomous pick-and-place on the Unitree G1 (29 DoF) in NVIDIA Isaac Lab.
 A rule-based state machine decomposes the task into 8 sequential RL skill primitives
