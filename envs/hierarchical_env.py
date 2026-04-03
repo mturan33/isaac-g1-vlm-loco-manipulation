@@ -365,7 +365,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(2.0, 1.5, 0.45),  # Left of table, reachable by robot
+            pos=(2.5, 1.8, 0.45),  # Left-front of table, reachable by robot
             rot=(0.7071, 0.0, 0.0, -0.7071),  # Face toward robot (handle side)
             joint_pos={
                 "door_left_joint": 0.0,
@@ -379,8 +379,8 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
                 joint_names_expr=["drawer_top_joint", "drawer_bottom_joint"],
                 effort_limit_sim=100.0,
                 velocity_limit_sim=100.0,
-                stiffness=0.0,    # Free to slide (robot pulls)
-                damping=5.0,      # Some resistance for realism
+                stiffness=50.0,   # PD control for position targets
+                damping=10.0,     # Smooth motion
             ),
             "doors": ImplicitActuatorCfg(
                 joint_names_expr=["door_left_joint", "door_right_joint"],

@@ -118,11 +118,18 @@ class SemanticMap:
                 drawer_pos_val = 0.0
                 open_ratio = 0.0
 
-            # Estimate handle position: cabinet pos + offset for handle
-            # Handle is on the front face, at roughly cabinet height + 0.25m
+            # Estimate handle position: cabinet front face + handle height
+            # Cabinet is rotated -90° around Z, so its front face (originally +X)
+            # now faces -Y. Handle protrudes ~0.3m from cabinet center.
+            # Use robot position to compute approach-facing handle offset.
+            dx = robot_pos[0] - cab_pos[0]
+            dy = robot_pos[1] - cab_pos[1]
+            dist_xy = math.sqrt(dx * dx + dy * dy) + 1e-6
+            # Offset handle 0.3m toward robot from cabinet center
+            handle_offset = 0.3
             handle_pos = [
-                cab_pos[0],
-                cab_pos[1],
+                cab_pos[0] + handle_offset * dx / dist_xy,
+                cab_pos[1] + handle_offset * dy / dist_xy,
                 cab_pos[2] + 0.25,  # Top drawer handle height
             ]
 
@@ -263,6 +270,15 @@ class SemanticMap:
         """Get per-env world position tensor [num_envs, 3] from sim."""
         if self.mode != "ground_truth" or self.env is None:
             return None
+
+        # For interactables (drawer), return handle position from semantic map
+        # instead of entity root (which is the cabinet center)
+        if target_id in self.interactables:
+            ia = self.interactables[target_id]
+            pos = ia.get("handle_position", ia["position_3d"])
+            return torch.tensor(pos, device=self.env.device).unsqueeze(0).expand(
+                self.env.num_envs, -1
+            ).clone()
 
         entity = self._resolve_entity(target_id)
         if entity is not None:
