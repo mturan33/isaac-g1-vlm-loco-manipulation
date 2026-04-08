@@ -77,8 +77,8 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-# Auto-enable cameras (needed for head_camera sensor)
-args_cli.enable_cameras = True
+# NOTE: Camera is NOT auto-enabled. Use --enable_cameras explicitly if needed.
+# Closed-loop works fine without camera (JSON-only replanning).
 
 # Launch the simulator
 app_launcher = AppLauncher(args_cli)
