@@ -133,20 +133,9 @@ class SemanticMap:
                 drawer_pos_val = 0.0
                 open_ratio = 0.0
 
-            # Estimate handle position: cabinet front face + handle height
-            # Cabinet is rotated -90° around Z, so its front face (originally +X)
-            # now faces -Y. Handle protrudes ~0.3m from cabinet center.
-            # Use robot position to compute approach-facing handle offset.
-            dx = robot_pos[0] - cab_pos[0]
-            dy = robot_pos[1] - cab_pos[1]
-            dist_xy = math.sqrt(dx * dx + dy * dy) + 1e-6
-            # Offset handle 0.3m toward robot from cabinet center
-            handle_offset = 0.3
-            handle_pos = [
-                cab_pos[0] + handle_offset * dx / dist_xy,
-                cab_pos[1] + handle_offset * dy / dist_xy,
-                cab_pos[2] + 0.25,  # Top drawer handle height
-            ]
+            # Read actual handle body position from articulation
+            # This is "sim perception" — same output as real 3D YOLO would provide
+            handle_pos = self._get_handle_position(cab, cab_pos)
 
             cab_dist = math.sqrt(
                 (handle_pos[0] - robot_pos[0]) ** 2
@@ -286,9 +275,18 @@ class SemanticMap:
         if self.mode != "ground_truth" or self.env is None:
             return None
 
-        # For interactables (drawer), return handle position from semantic map
-        # instead of entity root (which is the cabinet center)
+        # For interactables (drawer), return handle body position
         if target_id in self.interactables:
+            # Re-read fresh handle position (it moves as drawer opens)
+            env = self.env
+            if hasattr(env, 'cabinet'):
+                cab = env.cabinet
+                cab_pos = cab.data.root_pos_w[0].cpu().tolist()
+                handle_pos = self._get_handle_position(cab, cab_pos)
+                return torch.tensor(handle_pos, device=env.device).unsqueeze(0).expand(
+                    env.num_envs, -1
+                ).clone()
+            # Fallback to stored position
             ia = self.interactables[target_id]
             pos = ia.get("handle_position", ia["position_3d"])
             return torch.tensor(pos, device=self.env.device).unsqueeze(0).expand(
@@ -325,6 +323,57 @@ class SemanticMap:
             if class_name in target_id or target_id in class_name:
                 return entity
         return None
+
+    # ------------------------------------------------------------------
+    # Handle position from articulation bodies
+    # ------------------------------------------------------------------
+    def _get_handle_position(self, cabinet, cab_pos_list: list) -> list:
+        """Get drawer handle world position from cabinet body data.
+
+        Reads the actual body positions from the articulation to find
+        the drawer handle. This is 'sim perception' — same output format
+        as a real 3D object detector (YOLO + depth) would provide.
+
+        Falls back to cabinet root + offset if body lookup fails.
+        """
+        try:
+            # Try to find handle body by name
+            body_names = cabinet.body_names
+            handle_idx = None
+            for i, name in enumerate(body_names):
+                if "drawer_handle" in name or "handle_bottom" in name or "handle_top" in name:
+                    handle_idx = i
+                    break
+
+            if handle_idx is not None:
+                # Read actual handle body world position
+                body_pos = cabinet.data.body_pos_w[0, handle_idx].cpu().tolist()
+                return body_pos
+
+            # Try: find any "drawer" body (the drawer itself, not just handle)
+            for i, name in enumerate(body_names):
+                if "drawer_top" in name and "joint" not in name:
+                    body_pos = cabinet.data.body_pos_w[0, i].cpu().tolist()
+                    return body_pos
+
+        except Exception as e:
+            pass  # Graceful fallback
+
+        # Fallback: cabinet root + estimated offset
+        # Use cabinet orientation to compute front-facing offset
+        try:
+            cab_quat = cabinet.data.root_quat_w[0].cpu()
+            # Cabinet front direction from quaternion
+            from isaaclab.utils.math import quat_apply
+            forward = torch.tensor([0.3, 0.0, 0.25], dtype=torch.float32)
+            offset = quat_apply(cab_quat.unsqueeze(0), forward.unsqueeze(0))[0].tolist()
+            return [
+                cab_pos_list[0] + offset[0],
+                cab_pos_list[1] + offset[1],
+                cab_pos_list[2] + offset[2],
+            ]
+        except Exception:
+            return [cab_pos_list[0], cab_pos_list[1], cab_pos_list[2] + 0.25]
 
     # ------------------------------------------------------------------
     # Camera helpers (for VLM closed-loop)

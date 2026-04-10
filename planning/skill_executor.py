@@ -1040,6 +1040,20 @@ class SkillExecutor:
         env = self.env
         self._last_reach_target = target  # Track for grasp to know what we're grasping
 
+        # Drawer reach: skip arm policy, just extend arm forward
+        # The arm policy was trained for table-height objects, not drawer handles
+        # Grasp will handle the magnetic attach with generous 0.5m distance
+        if "drawer" in target:
+            env.set_manipulation_mode(True)
+            env.enable_arm_policy(False)
+            # Brief pause to stabilize
+            for _ in range(20):
+                if not self._is_running():
+                    break
+                arm_targets = env.arm_controller.get_targets()
+                env.step_manipulation(self._stand_cmd, arm_targets)
+            return {"status": "success", "reason": "Drawer reach (arm held for grasp)"}
+
         if env.arm_policy is None:
             return {"status": "failed", "reason": "No arm policy loaded"}
 
@@ -1781,6 +1795,10 @@ class SkillExecutor:
         # Use heuristic arm control — retract arm to pull drawer
         env.enable_arm_policy(False)
 
+        # Increase arm controller speed for pull (default 0.03 is too slow)
+        original_speed = env.arm_controller.interp_speed
+        env.arm_controller.interp_speed = 0.10  # 3x faster for pulling
+
         # Get current arm joint positions
         current_arm = env.robot.data.joint_pos[:, env._arm_idx].clone()
         right_start = 7  # Right arm starts at index 7 in the 14-joint arm array
@@ -1801,19 +1819,23 @@ class SkillExecutor:
 
             progress = min((step + 1) / max_steps, 1.0)
 
-            # Retract arm: increase shoulder pitch + bend elbow
-            # This physically moves EE backward (toward robot)
+            # Retract arm: increase shoulder pitch + bend elbow + yaw
+            # Aggressive retraction to pull EE away from drawer handle
             target_arm = current_arm.clone()
-            target_arm[:, right_start + 0] += progress * 1.2   # shoulder_pitch retract (aggressive)
-            target_arm[:, right_start + 3] += progress * 0.6   # elbow bend
-            target_arm[:, right_start + 2] -= progress * 0.3   # shoulder_yaw inward
+            target_arm[:, right_start + 0] += progress * 1.5   # shoulder_pitch retract (very aggressive)
+            target_arm[:, right_start + 3] += progress * 0.8   # elbow bend
+            target_arm[:, right_start + 2] -= progress * 0.4   # shoulder_yaw inward
+            target_arm[:, right_start + 1] -= progress * 0.3   # shoulder_roll
             env.arm_controller.set_custom_targets(target_arm)
             arm_targets = env.arm_controller.get_targets()
 
-            # PID hold for standing
-            hold_cmd = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            if isinstance(hold_cmd, tuple):
-                hold_cmd = hold_cmd[0]
+            # Backward walk to physically pull the robot away from drawer
+            backward_cmd = self._stand_cmd.clone()
+            if progress < 0.3:
+                backward_cmd[:, 0] = -0.05  # Start gentle
+            else:
+                backward_cmd[:, 0] = -0.25  # Then pull hard
+            hold_cmd = backward_cmd
 
             # step_manipulation calls _update_attached_drawer internally
             # which couples EE movement to drawer joint
@@ -1838,6 +1860,9 @@ class SkillExecutor:
                 break
 
         opened_dist = final_drawer_pos - initial_drawer_pos
+
+        # Restore original arm controller speed
+        env.arm_controller.interp_speed = original_speed
 
         # Stabilize
         for _ in range(20):

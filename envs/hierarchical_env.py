@@ -556,6 +556,7 @@ class HierarchicalG1Env:
         self._drawer_attach_ee = None   # EE position at drawer attach time
         self._drawer_joint_idx = None   # drawer joint index in cabinet
         self._drawer_initial_pos = 0.0  # drawer joint pos at attach time
+        self._drawer_attach_handle_dist = None  # EE-handle dist at attach time
         self._attach_quat_offset[:, 0] = 1.0  # identity quaternion
 
         # -- Debug visualization markers --
@@ -1039,17 +1040,27 @@ class HierarchicalG1Env:
         """
         ee_world, _ = self._compute_palm_ee()
 
-        # Get drawer handle approximate position from cabinet
-        cab_pos = self.cabinet.data.root_pos_w[0]  # [3]
-        robot_pos = self.robot.data.root_pos_w[0]
-        # Handle offset: 0.3m toward robot from cabinet center, +0.25m Z
-        dx = robot_pos[0] - cab_pos[0]
-        dy = robot_pos[1] - cab_pos[1]
-        dist_xy = (dx ** 2 + dy ** 2).sqrt() + 1e-6
-        handle_pos = cab_pos.clone()
-        handle_pos[0] += 0.3 * dx / dist_xy
-        handle_pos[1] += 0.3 * dy / dist_xy
-        handle_pos[2] += 0.25
+        # Get actual handle body position from cabinet articulation
+        cab = self.cabinet
+        handle_pos = None
+        try:
+            body_names = cab.body_names
+            for i, name in enumerate(body_names):
+                if "drawer_handle" in name or "handle_bottom" in name or "handle_top" in name:
+                    handle_pos = cab.data.body_pos_w[0, i]
+                    break
+            if handle_pos is None:
+                for i, name in enumerate(body_names):
+                    if "drawer_top" in name and "joint" not in name:
+                        handle_pos = cab.data.body_pos_w[0, i]
+                        break
+        except Exception:
+            pass
+
+        if handle_pos is None:
+            # Fallback: cabinet root + Z offset
+            handle_pos = cab.data.root_pos_w[0].clone()
+            handle_pos[2] += 0.25
 
         dist = (ee_world[0] - handle_pos).norm().item()
 
@@ -1065,6 +1076,7 @@ class HierarchicalG1Env:
                     self._drawer_joint_idx = i
                     break
             self._drawer_initial_pos = self.cabinet.data.joint_pos[0, self._drawer_joint_idx].item() if self._drawer_joint_idx is not None else 0.0
+            self._drawer_attach_handle_dist = dist  # Record EE-handle distance at attach time
             print(f"  [MagneticGrasp] Drawer handle attached! dist={dist:.3f}m")
             return True
         else:
@@ -1076,6 +1088,7 @@ class HierarchicalG1Env:
         if self._object_attached:
             self._object_attached = False
             self._attached_target = None
+            self._drawer_attach_handle_dist = None
             print("  [MagneticGrasp] Object detached")
 
     # ================================================================== #
@@ -1189,22 +1202,36 @@ class HierarchicalG1Env:
     def _update_attached_drawer(self):
         """Drive drawer joint based on how far the EE has retracted.
 
-        The robot physically pulls its arm back. We measure how much
-        the EE moved away from its attach-time position and apply
-        that distance as drawer joint displacement.
+        The robot physically pulls its arm back. We measure the total
+        Euclidean distance the EE moved from its attach-time position
+        and apply that as drawer joint displacement.
         This creates a realistic coupling: robot pulls → drawer opens.
+        Direction-independent: works regardless of robot approach angle.
         """
         if self._drawer_joint_idx is None or self._drawer_attach_ee is None:
             return
 
         ee_world, _ = self._compute_palm_ee()
-        # How far has EE moved from attach position (in XY plane)?
-        delta = self._drawer_attach_ee - ee_world  # toward robot = positive pull
-        # Project onto robot's forward axis (body X) for pull distance
-        root_quat = self.robot.data.root_quat_w
-        delta_body = quat_apply_inverse(root_quat, delta)
-        # Pull distance = movement in -X body direction (toward robot)
-        pull_dist = delta_body[:, 0].mean().item()  # positive = pulled toward robot
+
+        # Measure how much EE has moved AWAY from the drawer handle
+        # Get current handle position
+        handle_pos = None
+        try:
+            for i, name in enumerate(self.cabinet.body_names):
+                if "drawer_handle" in name or "handle_bottom" in name:
+                    handle_pos = self.cabinet.data.body_pos_w[:, i]
+                    break
+        except Exception:
+            pass
+        if handle_pos is None:
+            handle_pos = self.cabinet.data.root_pos_w
+
+        # Current EE-handle distance vs attach-time distance
+        current_dist = (ee_world - handle_pos).norm(dim=-1).mean().item()
+        if not hasattr(self, '_drawer_attach_handle_dist'):
+            self._drawer_attach_handle_dist = current_dist
+        # Pull distance = how much further the EE is from handle compared to attach time
+        pull_dist = max(0.0, current_dist - self._drawer_attach_handle_dist)
 
         if pull_dist > 0.005:  # Only open if actually pulling (5mm deadzone)
             target_pos = self._drawer_initial_pos + pull_dist
