@@ -1113,11 +1113,9 @@ class SkillExecutor:
                     h = obs["base_height"].mean().item()
                     print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
 
-                # Attach when arm reaches as close as possible to handle
-                # Cabinet body prevents robot from getting closer than ~0.70m
-                # Arm extends ~0.38m forward → EE is ~0.55-0.65m from handle
-                if ee_to_handle < 0.65:
-                    attached = env.attach_drawer_to_hand(max_dist=0.70)
+                # Attach at full arm extension (dramatic pose)
+                if ee_to_handle < 0.85:
+                    attached = env.attach_drawer_to_hand(max_dist=0.90)
                     if attached:
                         print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
                         # Record arm position for pull phase
@@ -1127,13 +1125,24 @@ class SkillExecutor:
             # Switch to heuristic arm — freeze arm at current position
             env.enable_arm_policy(False)
 
-            # Stabilize briefly (fast)
+            # Set wrist horizontal for drawer grip (palm faces handle)
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+            # Right wrist: indices 11=roll, 12=pitch, 13=yaw in the 14-joint arm array
+            arm_targets[:, 11] = -1.57   # wrist_roll: rotate palm inward
+            arm_targets[:, 12] = 0.0     # wrist_pitch: neutral
+            arm_targets[:, 13] = 0.0     # wrist_yaw: neutral
             self._hold_arm_targets = arm_targets
-            for _ in range(8):
+
+            # Close fingers for visual grip + interpolate wrist to target
+            env.finger_controller.close(hand="right")
+            original_speed = env.finger_controller.close_speed
+            env.finger_controller.close_speed = 0.20  # Fast close
+            for _ in range(15):
                 if not self._is_running():
                     break
                 env.step_manipulation(self._stand_cmd, arm_targets)
+            env.finger_controller.close_speed = original_speed
+            print(f"  [Reach] Wrist set horizontal, fingers closed")
 
             attached = getattr(env, '_object_attached', False) and getattr(env, '_attached_target', None) == "drawer"
             if attached:
@@ -1394,7 +1403,7 @@ class SkillExecutor:
         if not already_attached:
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.70)
+                attached = env.attach_drawer_to_hand(max_dist=0.90)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:
@@ -1856,14 +1865,8 @@ class SkillExecutor:
     def _execute_pull(self, direction=None, distance: float = 0.25, speed: float = 0.003) -> dict:
         """Pull drawer by walking backward with arm FIXED at handle height.
 
-        Mechanism:
-        1. Arm stays at EXACT same position (locked at handle height)
-        2. Robot walks backward — this creates the pulling force
-        3. _update_attached_drawer() drives drawer joint based on robot
-           backward displacement (measured from root position change)
-        4. Arm does NOT retract — it stays extended at handle level
-
-        This is realistic: human grabs handle, walks backward, drawer opens.
+        Uses direct PhysX API to drive drawer joint (bypasses PD actuator).
+        Robot walks backward, drawer opens proportionally.
         """
         env = self.env
 
@@ -1871,65 +1874,91 @@ class SkillExecutor:
         if not env._object_attached or env._attached_target != "drawer":
             return {"status": "failed", "reason": "Drawer handle not attached to hand"}
 
+        # Disable env's drawer update — we'll control it directly
+        saved_target = env._attached_target
+        env._attached_target = "drawer_pull_direct"  # Prevents _update_attached_drawer
+
         # Use heuristic arm control — FREEZE arm at current position
         env.enable_arm_policy(False)
 
         # Lock arm at EXACTLY current position — no retraction, no dropping
         arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        # Record initial robot position — pull distance = backward displacement
+        # Record initial robot position
         initial_root_pos = env.robot.data.root_pos_w[:, :2].clone()
-        initial_root_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
 
         # Read initial drawer position
         drawer_joint_idx = env._drawer_joint_idx
         if drawer_joint_idx is None:
+            env._attached_target = saved_target
             return {"status": "failed", "reason": "drawer_top_joint not found"}
 
         initial_drawer_pos = env.cabinet.data.joint_pos[0, drawer_joint_idx].item()
 
-        max_steps = 250  # ~5s at 50Hz
-        final_drawer_pos = initial_drawer_pos
+        # Disable drawer PD stiffness via PhysX (prevents actuator from fighting)
+        import torch
+        physx_view = env.cabinet.root_physx_view
+        # PhysX uses different devices: properties on CPU, states on GPU
+        _stiff = physx_view.get_dof_stiffnesses()
+        stiff_indices = torch.arange(env.num_envs, device=_stiff.device, dtype=torch.long)
+        gpu_indices = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+        original_stiffnesses = physx_view.get_dof_stiffnesses().clone()
+        zero_stiffness = original_stiffnesses.clone()
+        zero_stiffness[:, drawer_joint_idx] = 0.0
+        physx_view.set_dof_stiffnesses(zero_stiffness, stiff_indices)
+        print(f"  [Pull] Disabled drawer PD (stiffness zeroed for joint {drawer_joint_idx})")
+
+        max_steps = 250
+        opened_dist = 0.0
+        env_indices = gpu_indices  # GPU device for position/velocity writes
 
         for step in range(max_steps):
             if not self._is_running():
                 break
 
-            # Backward walk command — robot walks AWAY from drawer
+            # Backward walk command
             backward_cmd = self._stand_cmd.clone()
             if step < 10:
-                backward_cmd[:, 0] = -0.10  # Gentle start
+                backward_cmd[:, 0] = -0.10
             elif step < 30:
-                backward_cmd[:, 0] = -0.20  # Ramp up
+                backward_cmd[:, 0] = -0.20
             else:
-                backward_cmd[:, 0] = -0.35  # Full backward walk
+                backward_cmd[:, 0] = -0.35
 
-            # Arm targets FROZEN — same position throughout pull
-            # This keeps the hand at handle height, no dropping
             obs = env.step_manipulation(backward_cmd, arm_targets)
 
-            # Read actual drawer position
-            final_drawer_pos = env.cabinet.data.joint_pos[0, drawer_joint_idx].item()
-            opened = final_drawer_pos - initial_drawer_pos
+            # Direct PhysX: set drawer position based on robot backward displacement
+            root_disp = (env.robot.data.root_pos_w[:, :2] - initial_root_pos).norm(dim=-1).mean().item()
+            if root_disp > 0.005:
+                target_pos = min(initial_drawer_pos + root_disp, 0.40)
+                dof_pos = physx_view.get_dof_positions()
+                dof_pos[:, drawer_joint_idx] = target_pos
+                physx_view.set_dof_positions(dof_pos, env_indices)
+                dof_vel = physx_view.get_dof_velocities()
+                dof_vel[:, drawer_joint_idx] = 0.0
+                physx_view.set_dof_velocities(dof_vel, env_indices)
 
-            # Check height
+            # Read back
+            opened_dist = root_disp if root_disp > 0.005 else 0.0
+
             h = obs["base_height"].mean().item()
             if h < 0.5:
+                physx_view.set_dof_stiffnesses(original_stiffnesses)
+                env._attached_target = saved_target
                 return {"status": "failed", "reason": f"Robot fell during pull (h={h:.2f}m)"}
 
-            # Log progress
             if step % 30 == 0:
-                root_disp = (env.robot.data.root_pos_w[:, :2] - initial_root_pos).norm(dim=-1).mean().item()
                 ee_world, _ = env._compute_palm_ee()
-                print(f"  [Pull] Step {step:3d} | drawer={opened:.3f}m / {distance:.3f}m | "
+                print(f"  [Pull] Step {step:3d} | drawer={opened_dist:.3f}m / {distance:.3f}m | "
                       f"h={h:.2f} | robot_back={root_disp:.3f}m | EE_z={ee_world[0,2]:.3f}")
 
-            # Done if drawer opened enough
-            if opened >= distance * 0.80:
-                print(f"  [Pull] Drawer opened {opened:.3f}m at step {step}")
+            if opened_dist >= distance * 0.80:
+                print(f"  [Pull] Drawer opened {opened_dist:.3f}m at step {step}")
                 break
 
-        opened_dist = final_drawer_pos - initial_drawer_pos
+        # Restore drawer PD stiffness
+        physx_view.set_dof_stiffnesses(original_stiffnesses, stiff_indices)
+        env._attached_target = saved_target
 
         # Stabilize (stand still)
         for _ in range(20):

@@ -365,6 +365,106 @@ import threading
 
 
 # ============================================================================
+# VLM Plan Overlay (Flexion-style on-screen display)
+# ============================================================================
+
+class VLMOverlay:
+    """On-screen overlay showing VLM plan + current step (Flexion style).
+
+    Creates an omni.ui window in the top-left corner with:
+    - Current plan steps
+    - Active step highlighted
+    - VLM reasoning text
+    """
+
+    def __init__(self):
+        self._window = None
+        self._plan_label = None
+        self._status_label = None
+        self._enabled = False
+        try:
+            import omni.ui as ui
+            self._ui = ui
+            self._create_window()
+            self._enabled = True
+            print("[VLMOverlay] Created overlay window")
+        except Exception as e:
+            print(f"[VLMOverlay] Could not create overlay (headless?): {e}")
+
+    def _create_window(self):
+        ui = self._ui
+        self._window = ui.Window(
+            "VLM Planner",
+            width=420, height=280,
+            position_x=15, position_y=15,
+            flags=(ui.WINDOW_FLAGS_NO_RESIZE
+                   | ui.WINDOW_FLAGS_NO_SCROLLBAR
+                   | ui.WINDOW_FLAGS_NO_MOVE),
+        )
+        with self._window.frame:
+            with ui.ZStack():
+                # Semi-transparent background
+                ui.Rectangle(
+                    style={"background_color": ui.color(0, 0, 0, 0.7),
+                           "border_radius": 8}
+                )
+                with ui.VStack(spacing=4):
+                    ui.Spacer(height=8)
+                    with ui.HStack(height=22):
+                        ui.Spacer(width=12)
+                        ui.Label("VLM Planner",
+                                 style={"font_size": 16, "color": ui.color(0.3, 1.0, 0.3)})
+                    with ui.HStack():
+                        ui.Spacer(width=12)
+                        with ui.VStack():
+                            self._plan_label = ui.Label(
+                                "Waiting for plan...",
+                                word_wrap=True,
+                                style={"font_size": 13, "color": ui.color(1, 1, 1, 0.9)},
+                            )
+                    ui.Spacer(height=4)
+                    with ui.HStack(height=20):
+                        ui.Spacer(width=12)
+                        self._status_label = ui.Label(
+                            "",
+                            style={"font_size": 12, "color": ui.color(1.0, 0.8, 0.2)},
+                        )
+                    ui.Spacer(height=6)
+
+    def set_plan(self, plan_steps: list, current_idx: int = -1):
+        """Show plan with current step highlighted."""
+        if not self._enabled:
+            return
+        lines = []
+        for i, step in enumerate(plan_steps):
+            skill = step["skill"]
+            params = step.get("params", {})
+            param_str = ", ".join(f"{k}={v}" for k, v in params.items()) if params else ""
+            marker = ">>>" if i == current_idx else "   "
+            check = "[OK]" if i < current_idx else "[..]" if i == current_idx else "    "
+            lines.append(f"{marker} {i+1}. {skill}({param_str}) {check}")
+        self._plan_label.text = "\n".join(lines)
+
+    def set_status(self, text: str):
+        """Update status line."""
+        if not self._enabled and self._status_label:
+            return
+        if self._status_label:
+            self._status_label.text = text
+
+    def set_generating(self):
+        """Show VLM is generating."""
+        if not self._enabled:
+            return
+        self._plan_label.text = "Generating plan with VLM..."
+        self._status_label.text = "Waiting for model response..."
+
+    def destroy(self):
+        if self._window:
+            self._window.destroy()
+
+
+# ============================================================================
 # Closed-Loop Controller (VLM background replanning)
 # ============================================================================
 
@@ -678,12 +778,16 @@ def main():
     # ------------------------------------------------------------------
     # 5. Generate plan
     # ------------------------------------------------------------------
+    # Create VLM overlay (Flexion-style on-screen plan display)
+    vlm_overlay = VLMOverlay()
+
     print(f"\n[Demo] Planning: \"{args_cli.task}\"")
     plan = None
     vlm_fallback = False
 
     if args_cli.planner == "vlm" and vlm is not None:
         print(f"[Demo] Using VLM planner ({args_cli.vlm_model}, model pre-loaded)...")
+        vlm_overlay.set_generating()
         plan = vlm.plan(args_cli.task, world_json)
 
         if plan is None:
@@ -703,6 +807,8 @@ def main():
     print(f"\n[Demo] Generated plan ({len(plan)} steps):")
     for i, step in enumerate(plan):
         print(f"  {i+1}. {step['skill']}({step.get('params', {})})")
+    vlm_overlay.set_plan(plan)
+    vlm_overlay.set_status(f"Task: {args_cli.task}")
 
     # ------------------------------------------------------------------
     # 6. Execute plan
@@ -733,6 +839,10 @@ def main():
             cl.mark_current(step)
             skill_name = step["skill"]
             params = step.get("params", {})
+            # Update overlay with current step
+            step_idx = len(plan_results)
+            vlm_overlay.set_plan(plan, current_idx=step_idx)
+            vlm_overlay.set_status(f"Executing: {skill_name}")
             print(f"\n[CL] Executing: {skill_name}({params})")
 
             handler = executor._skills.get(skill_name)
@@ -751,6 +861,8 @@ def main():
             reason = skill_result.get("reason", "")
             symbol = "+" if status == "success" else "x"
             print(f"  [{symbol}] {skill_name}: {status} - {reason}")
+            vlm_overlay.set_plan(plan, current_idx=len(plan_results))
+            vlm_overlay.set_status(f"[{symbol}] {skill_name}: {reason}")
 
             if status == "failed":
                 print(f"[CL] Skill failed, waiting for VLM replan...")

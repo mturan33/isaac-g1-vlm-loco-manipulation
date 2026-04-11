@@ -360,7 +360,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Cabinet",
         spawn=sim_utils.UsdFileCfg(
             usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/drawers/cabinet_collider.usd",
-            scale=(1.3, 1.3, 1.3),  # 30% bigger — larger handles for G1 hands
+            scale=(2.0, 2.0, 2.0),  # 2x scale for visible handles + dramatic distance
             activate_contact_sensors=False,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -379,10 +379,10 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         actuators={
             "drawers": ImplicitActuatorCfg(
                 joint_names_expr=["drawer_top_joint", "drawer_bottom_joint"],
-                effort_limit_sim=100.0,
+                effort_limit_sim=200.0,
                 velocity_limit_sim=100.0,
-                stiffness=50.0,   # PD control for position targets
-                damping=10.0,     # Smooth motion
+                stiffness=200.0,  # High stiffness for fast PD response
+                damping=20.0,     # Smooth motion
             ),
             "doors": ImplicitActuatorCfg(
                 joint_names_expr=["door_left_joint", "door_right_joint"],
@@ -465,6 +465,7 @@ class HierarchicalG1Env:
         self.table: RigidObject = self.scene["table"]
         self.pickup_obj: RigidObject = self.scene["pickup_object"]
         self.cabinet: Articulation = self.scene["cabinet"]
+        self._handle_scaled = False  # Scale handle after first reset
 
         # -- Load V6.2 locomotion policy --
         from ..low_level.policy_wrapper import LocomotionPolicy
@@ -737,6 +738,11 @@ class HierarchicalG1Env:
         # Store initial XY positions
         self._initial_pos = self.robot.data.root_pos_w[:, :2].clone()
 
+        # Scale drawer handle for visibility (once, after PhysX is initialized)
+        if not self._handle_scaled:
+            self._scale_drawer_handle(scale_factor=2.0)
+            self._handle_scaled = True
+
         return self.get_obs()
 
     def step(self, velocity_command: torch.Tensor) -> dict:
@@ -982,6 +988,52 @@ class HierarchicalG1Env:
             target_body = target_body.unsqueeze(0).expand(self.num_envs, -1)
         self._arm_target_body = target_body.clone()
 
+    def _scale_drawer_handle(self, scale_factor: float = 2.0):
+        """Scale drawer handle visual mesh for better visibility."""
+        try:
+            import omni.usd
+            from pxr import UsdGeom, Gf
+            stage = omni.usd.get_context().get_stage()
+            cab = self.cabinet
+            scaled_names = []
+            for i, name in enumerate(cab.body_names):
+                if "handle" in name.lower():
+                    # Try multiple path patterns
+                    candidates = [
+                        f"/World/envs/env_0/Cabinet/{name}",
+                        f"/World/envs/env_0/Cabinet/{name}/visuals",
+                    ]
+                    prim = None
+                    prim_path = None
+                    for pp in candidates:
+                        p = stage.GetPrimAtPath(pp)
+                        if p.IsValid():
+                            prim = p
+                            prim_path = pp
+                            break
+                    if prim is None:
+                        # Traverse children to find handle
+                        cab_prim = stage.GetPrimAtPath("/World/envs/env_0/Cabinet")
+                        if cab_prim.IsValid():
+                            for child in cab_prim.GetAllChildren():
+                                if name in child.GetPath().pathString:
+                                    prim = child
+                                    prim_path = child.GetPath().pathString
+                                    break
+                    if prim.IsValid():
+                        xform = UsdGeom.Xformable(prim)
+                        # Don't clear existing xform ops — just add scale
+                        scale_op = xform.AddScaleOp(opSuffix="handleScale")
+                        scale_op.Set(Gf.Vec3f(scale_factor, scale_factor, scale_factor))
+                        scaled_names.append(name)
+                        print(f"  [HandleScale] Scaled '{name}' by {scale_factor}x")
+                    else:
+                        print(f"  [HandleScale] Prim not found: {prim_path}")
+            if not scaled_names:
+                print(f"  [HandleScale] No handle prim scaled (bodies: {list(cab.body_names)})")
+        except Exception as e:
+            print(f"  [HandleScale] Could not scale handle: {e}")
+
     def _compute_palm_ee(self):
         """
         Compute end-effector position from palm body.
@@ -1031,7 +1083,7 @@ class HierarchicalG1Env:
             print(f"  [MagneticGrasp] Object too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
             return False
 
-    def attach_drawer_to_hand(self, max_dist: float = 0.70) -> bool:
+    def attach_drawer_to_hand(self, max_dist: float = 0.90) -> bool:
         """Rigid-attach EE to drawer handle (parent-child lock).
 
         When attached:
@@ -1225,16 +1277,17 @@ class HierarchicalG1Env:
         current_robot_pos = self.robot.data.root_pos_w[:, :2]
         robot_disp = (current_robot_pos - self._drawer_attach_robot_pos).norm(dim=-1).mean().item()
 
-        if robot_disp > 0.01:  # 1cm deadzone
+        if robot_disp > 0.005:  # 5mm deadzone
             target_pos = self._drawer_initial_pos + robot_disp
-            # Clamp to reasonable range
             target_pos = max(0.0, min(0.40, target_pos))
 
-            # Write drawer joint state directly
+            # Teleport drawer joint + set PD target to match
             new_pos = self.cabinet.data.joint_pos.clone()
             new_pos[:, self._drawer_joint_idx] = target_pos
             new_vel = torch.zeros_like(self.cabinet.data.joint_vel)
             self.cabinet.write_joint_state_to_sim(new_pos, new_vel)
+            # Also update the PD target buffer so write_data_to_sim doesn't fight
+            self.cabinet.data.joint_pos_target[:, self._drawer_joint_idx] = target_pos
 
     def _build_arm_obs(self) -> torch.Tensor:
         """
