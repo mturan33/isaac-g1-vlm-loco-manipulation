@@ -1040,19 +1040,106 @@ class SkillExecutor:
         env = self.env
         self._last_reach_target = target  # Track for grasp to know what we're grasping
 
-        # Drawer reach: skip arm policy, just extend arm forward
-        # The arm policy was trained for table-height objects, not drawer handles
-        # Grasp will handle the magnetic attach with generous 0.5m distance
+        # Drawer reach: use arm policy to drive EE toward handle height
+        # Handle is at ~0.69m world, pelvis at ~0.77m → body z ≈ -0.08
+        # We need EE in front of robot at handle height
         if "drawer" in target:
             env.set_manipulation_mode(True)
-            env.enable_arm_policy(False)
-            # Brief pause to stabilize
-            for _ in range(20):
+            env.enable_arm_policy(True)
+
+            # Get handle world position
+            handle_pos_world = None
+            cab = env.cabinet
+            try:
+                for i, name in enumerate(cab.body_names):
+                    if "drawer_handle" in name or "handle_bottom" in name or "handle_top" in name:
+                        handle_pos_world = cab.data.body_pos_w[0, i].clone()
+                        break
+                if handle_pos_world is None:
+                    for i, name in enumerate(cab.body_names):
+                        if "drawer_top" in name and "joint" not in name:
+                            handle_pos_world = cab.data.body_pos_w[0, i].clone()
+                            break
+            except Exception:
+                pass
+            if handle_pos_world is None:
+                handle_pos_world = cab.data.root_pos_w[0].clone()
+                handle_pos_world[2] += 0.25
+
+            # Compute target in body frame — reach toward handle position
+            root_pos = env.robot.data.root_pos_w
+            root_quat = env.robot.data.root_quat_w
+            handle_body = quat_apply_inverse(root_quat, handle_pos_world.unsqueeze(0) - root_pos)
+
+            # Clamp to arm workspace (MAX_REACH from shoulder)
+            shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
+            from_shoulder = handle_body - shoulder_offset.unsqueeze(0)
+            dist_3d = from_shoulder.norm(dim=-1, keepdim=True)
+            scale = torch.clamp(self.MAX_REACH / (dist_3d + 1e-6), max=1.0)
+            reach_target_body = shoulder_offset.unsqueeze(0) + from_shoulder * scale
+            reach_target_world = quat_apply(root_quat, reach_target_body) + root_pos
+
+            env.set_arm_target_world(reach_target_world)
+            env.reset_arm_policy_state()
+
+            print(f"  [Reach] Drawer handle world: [{handle_pos_world[0]:.3f}, {handle_pos_world[1]:.3f}, {handle_pos_world[2]:.3f}]")
+            print(f"  [Reach] Reach target body:  [{reach_target_body[0,0]:.3f}, {reach_target_body[0,1]:.3f}, {reach_target_body[0,2]:.3f}]")
+
+            # PID hold + arm policy reach toward handle
+            hold_pos_xy = root_pos[:, :2].clone()
+            hold_yaw = get_yaw_from_quat(root_quat).clone()
+            self._hold_pos_xy = hold_pos_xy
+            self._hold_yaw = hold_yaw
+
+            reach_steps = 120
+            for step in range(reach_steps):
                 if not self._is_running():
                     break
-                arm_targets = env.arm_controller.get_targets()
+                hold_cmd, _ = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+                obs = env.step_arm_policy(hold_cmd)
+
+                # Refresh hold every 40 steps
+                if step > 0 and step % 40 == 0:
+                    hold_pos_xy = env.robot.data.root_pos_w[:, :2].clone()
+                    hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
+                    self._hold_pos_xy = hold_pos_xy
+                    self._hold_yaw = hold_yaw
+
+                # Check EE distance to handle
+                ee_world, _ = env._compute_palm_ee()
+                ee_to_handle = (ee_world[0] - handle_pos_world).norm().item()
+
+                if step % 20 == 0:
+                    h = obs["base_height"].mean().item()
+                    print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
+
+                # Attach when arm reaches as close as possible to handle
+                # Cabinet body prevents robot from getting closer than ~0.70m
+                # Arm extends ~0.38m forward → EE is ~0.55-0.65m from handle
+                if ee_to_handle < 0.65:
+                    attached = env.attach_drawer_to_hand(max_dist=0.70)
+                    if attached:
+                        print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
+                        # Record arm position for pull phase
+                        self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+                        break
+
+            # Switch to heuristic arm — freeze arm at current position
+            env.enable_arm_policy(False)
+
+            # Stabilize briefly
+            arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+            self._hold_arm_targets = arm_targets
+            for _ in range(15):
+                if not self._is_running():
+                    break
                 env.step_manipulation(self._stand_cmd, arm_targets)
-            return {"status": "success", "reason": "Drawer reach (arm held for grasp)"}
+
+            attached = getattr(env, '_object_attached', False) and getattr(env, '_attached_target', None) == "drawer"
+            if attached:
+                return {"status": "success", "reason": f"Drawer reach + handle locked (EE->handle={ee_to_handle:.3f}m)"}
+            else:
+                return {"status": "success", "reason": f"Drawer reach done (EE->handle={ee_to_handle:.3f}m, attach in grasp)"}
 
         if env.arm_policy is None:
             return {"status": "failed", "reason": "No arm policy loaded"}
@@ -1305,10 +1392,9 @@ class SkillExecutor:
 
         # Magnetic attach (skip if already attached)
         if not already_attached:
-            # Check if we're grasping a drawer handle
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.85)
+                attached = env.attach_drawer_to_hand(max_dist=0.70)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:
@@ -1768,18 +1854,16 @@ class SkillExecutor:
     # pull: Pull drawer/lever toward robot
     # ================================================================= #
     def _execute_pull(self, direction=None, distance: float = 0.25, speed: float = 0.003) -> dict:
-        """Pull drawer by physically retracting the robot's arm.
+        """Pull drawer by walking backward with arm FIXED at handle height.
 
-        The robot's EE is magnetically attached to the drawer handle.
-        As the arm retracts, _update_attached_drawer() in the env
-        couples EE movement to the drawer joint — the drawer opens
-        proportionally to how far the arm pulls back.
-        No cheating: the robot does the work.
+        Mechanism:
+        1. Arm stays at EXACT same position (locked at handle height)
+        2. Robot walks backward — this creates the pulling force
+        3. _update_attached_drawer() drives drawer joint based on robot
+           backward displacement (measured from root position change)
+        4. Arm does NOT retract — it stays extended at handle level
 
-        Args:
-            direction: [dx, dy, dz] pull direction (unused, kept for API compat)
-            distance: pull distance in meters (default 0.25m)
-            speed: arm retraction speed in rad/step
+        This is realistic: human grabs handle, walks backward, drawer opens.
         """
         env = self.env
 
@@ -1787,21 +1871,15 @@ class SkillExecutor:
         if not env._object_attached or env._attached_target != "drawer":
             return {"status": "failed", "reason": "Drawer handle not attached to hand"}
 
-        # Hold position (stand still while pulling)
-        root_pos = env.robot.data.root_pos_w
-        hold_pos_xy = root_pos[:, :2].clone()
-        hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
-
-        # Use heuristic arm control — retract arm to pull drawer
+        # Use heuristic arm control — FREEZE arm at current position
         env.enable_arm_policy(False)
 
-        # Increase arm controller speed for pull (default 0.03 is too slow)
-        original_speed = env.arm_controller.interp_speed
-        env.arm_controller.interp_speed = 0.10  # 3x faster for pulling
+        # Lock arm at EXACTLY current position — no retraction, no dropping
+        arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        # Get current arm joint positions
-        current_arm = env.robot.data.joint_pos[:, env._arm_idx].clone()
-        right_start = 7  # Right arm starts at index 7 in the 14-joint arm array
+        # Record initial robot position — pull distance = backward displacement
+        initial_root_pos = env.robot.data.root_pos_w[:, :2].clone()
+        initial_root_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
 
         # Read initial drawer position
         drawer_joint_idx = env._drawer_joint_idx
@@ -1810,37 +1888,25 @@ class SkillExecutor:
 
         initial_drawer_pos = env.cabinet.data.joint_pos[0, drawer_joint_idx].item()
 
-        max_steps = 200  # ~4s at 50Hz
+        max_steps = 250  # ~5s at 50Hz
         final_drawer_pos = initial_drawer_pos
 
         for step in range(max_steps):
             if not self._is_running():
                 break
 
-            progress = min((step + 1) / max_steps, 1.0)
-
-            # Retract arm: increase shoulder pitch + bend elbow + yaw
-            # Aggressive retraction to pull EE away from drawer handle
-            target_arm = current_arm.clone()
-            target_arm[:, right_start + 0] += progress * 1.5   # shoulder_pitch retract (very aggressive)
-            target_arm[:, right_start + 3] += progress * 0.8   # elbow bend
-            target_arm[:, right_start + 2] -= progress * 0.4   # shoulder_yaw inward
-            target_arm[:, right_start + 1] -= progress * 0.3   # shoulder_roll
-            env.arm_controller.set_custom_targets(target_arm)
-            arm_targets = env.arm_controller.get_targets()
-
-            # Backward walk to physically pull the robot away from drawer
-            # Robot steps back while pulling — visible pull motion
+            # Backward walk command — robot walks AWAY from drawer
             backward_cmd = self._stand_cmd.clone()
-            if progress < 0.15:
-                backward_cmd[:, 0] = -0.05  # Brief gentle start
+            if step < 10:
+                backward_cmd[:, 0] = -0.10  # Gentle start
+            elif step < 30:
+                backward_cmd[:, 0] = -0.20  # Ramp up
             else:
-                backward_cmd[:, 0] = -0.35  # Strong backward walk
-            hold_cmd = backward_cmd
+                backward_cmd[:, 0] = -0.35  # Full backward walk
 
-            # step_manipulation calls _update_attached_drawer internally
-            # which couples EE movement to drawer joint
-            obs = env.step_manipulation(hold_cmd, arm_targets)
+            # Arm targets FROZEN — same position throughout pull
+            # This keeps the hand at handle height, no dropping
+            obs = env.step_manipulation(backward_cmd, arm_targets)
 
             # Read actual drawer position
             final_drawer_pos = env.cabinet.data.joint_pos[0, drawer_joint_idx].item()
@@ -1853,7 +1919,10 @@ class SkillExecutor:
 
             # Log progress
             if step % 30 == 0:
-                print(f"  [Pull] Step {step:3d} | drawer={opened:.3f}m / {distance:.3f}m | h={h:.2f}")
+                root_disp = (env.robot.data.root_pos_w[:, :2] - initial_root_pos).norm(dim=-1).mean().item()
+                ee_world, _ = env._compute_palm_ee()
+                print(f"  [Pull] Step {step:3d} | drawer={opened:.3f}m / {distance:.3f}m | "
+                      f"h={h:.2f} | robot_back={root_disp:.3f}m | EE_z={ee_world[0,2]:.3f}")
 
             # Done if drawer opened enough
             if opened >= distance * 0.80:
@@ -1862,10 +1931,7 @@ class SkillExecutor:
 
         opened_dist = final_drawer_pos - initial_drawer_pos
 
-        # Restore original arm controller speed
-        env.arm_controller.interp_speed = original_speed
-
-        # Stabilize
+        # Stabilize (stand still)
         for _ in range(20):
             if not self._is_running():
                 break

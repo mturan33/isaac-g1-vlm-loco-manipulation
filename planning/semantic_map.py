@@ -284,18 +284,10 @@ class SemanticMap:
                 cab_pos = cab.data.root_pos_w[0].cpu().tolist()
                 handle_pos = self._get_handle_position(cab, cab_pos)
 
-                # Offset walk target 0.5m from handle toward robot
-                # so robot stops in front of the handle, not at the cabinet edge
-                robot_pos = env.robot.data.root_pos_w[0].cpu().tolist()
-                dx = robot_pos[0] - handle_pos[0]
-                dy = robot_pos[1] - handle_pos[1]
-                dist_xy = math.sqrt(dx * dx + dy * dy) + 1e-6
-                approach_offset = 0.5  # Stand 0.5m in front of handle
-                walk_target = [
-                    handle_pos[0] + approach_offset * dx / dist_xy,
-                    handle_pos[1] + approach_offset * dy / dist_xy,
-                    handle_pos[2],
-                ]
+                # Walk target = handle position directly
+                # Robot will naturally stop when body hits cabinet (~0.5m away)
+                # stop_distance in walk_to controls minimum approach distance
+                walk_target = [handle_pos[0], handle_pos[1], handle_pos[2]]
                 return torch.tensor(walk_target, device=env.device).unsqueeze(0).expand(
                     env.num_envs, -1
                 ).clone()

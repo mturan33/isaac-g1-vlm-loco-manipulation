@@ -1030,12 +1030,16 @@ class HierarchicalG1Env:
             print(f"  [MagneticGrasp] Object too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
             return False
 
-    def attach_drawer_to_hand(self, max_dist: float = 0.30) -> bool:
-        """Magnetic-attach EE to drawer handle.
+    def attach_drawer_to_hand(self, max_dist: float = 0.70) -> bool:
+        """Rigid-attach EE to drawer handle (parent-child lock).
 
-        Instead of teleporting the handle (which is an articulation body),
-        we record the coupling so that pull skill can drive the drawer
-        joint proportionally to the arm retraction.
+        When attached:
+        - EE is considered locked to the handle (no relative movement)
+        - Pull phase drives drawer joint based on robot backward displacement
+        - Release detaches the lock
+
+        Args:
+            max_dist: Max EE-handle distance to trigger attach (default 0.25m)
 
         Returns True if EE is close enough to handle, False otherwise.
         """
@@ -1059,7 +1063,6 @@ class HierarchicalG1Env:
             pass
 
         if handle_pos is None:
-            # Fallback: cabinet root + Z offset
             handle_pos = cab.data.root_pos_w[0].clone()
             handle_pos[2] += 0.25
 
@@ -1068,7 +1071,8 @@ class HierarchicalG1Env:
         if dist < max_dist:
             self._object_attached = True
             self._attached_target = "drawer"
-            # Record EE start position for pull tracking
+            # Record robot position at attach time — for pull displacement tracking
+            self._drawer_attach_robot_pos = self.robot.data.root_pos_w[:, :2].clone()
             self._drawer_attach_ee = ee_world.clone()
             # Find drawer_top_joint index
             self._drawer_joint_idx = None
@@ -1077,8 +1081,7 @@ class HierarchicalG1Env:
                     self._drawer_joint_idx = i
                     break
             self._drawer_initial_pos = self.cabinet.data.joint_pos[0, self._drawer_joint_idx].item() if self._drawer_joint_idx is not None else 0.0
-            self._drawer_attach_handle_dist = dist  # Record EE-handle distance at attach time
-            print(f"  [MagneticGrasp] Drawer handle attached! dist={dist:.3f}m")
+            print(f"  [MagneticGrasp] Drawer handle LOCKED! dist={dist:.3f}m (rigid attach)")
             return True
         else:
             print(f"  [MagneticGrasp] Drawer handle too far: {dist:.3f}m (max: {max_dist:.2f}m)")
@@ -1089,7 +1092,8 @@ class HierarchicalG1Env:
         if self._object_attached:
             self._object_attached = False
             self._attached_target = None
-            self._drawer_attach_handle_dist = None
+            self._drawer_attach_robot_pos = None
+            self._drawer_attach_ee = None
             print("  [MagneticGrasp] Object detached")
 
     # ================================================================== #
@@ -1201,41 +1205,27 @@ class HierarchicalG1Env:
         self.pickup_obj.write_root_state_to_sim(root_state)
 
     def _update_attached_drawer(self):
-        """Drive drawer joint based on how far the EE has retracted.
+        """Drive drawer joint based on robot backward displacement.
 
-        The robot physically pulls its arm back. We measure the total
-        Euclidean distance the EE moved from its attach-time position
-        and apply that as drawer joint displacement.
-        This creates a realistic coupling: robot pulls → drawer opens.
-        Direction-independent: works regardless of robot approach angle.
+        The robot walks backward with arm fixed at handle height.
+        We measure how far the robot has moved from its attach-time
+        position and apply that as drawer joint displacement.
+        This creates a rigid coupling: robot walks back → drawer opens.
         """
-        if self._drawer_joint_idx is None or self._drawer_attach_ee is None:
+        if self._drawer_joint_idx is None:
             return
 
-        ee_world, _ = self._compute_palm_ee()
+        # Measure robot backward displacement from attach-time position
+        if not hasattr(self, '_drawer_attach_robot_pos'):
+            # First call: record robot position at attach time
+            self._drawer_attach_robot_pos = self.robot.data.root_pos_w[:, :2].clone()
+            return
 
-        # Measure how much EE has moved AWAY from the drawer handle
-        # Get current handle position
-        handle_pos = None
-        try:
-            for i, name in enumerate(self.cabinet.body_names):
-                if "drawer_handle" in name or "handle_bottom" in name:
-                    handle_pos = self.cabinet.data.body_pos_w[:, i]
-                    break
-        except Exception:
-            pass
-        if handle_pos is None:
-            handle_pos = self.cabinet.data.root_pos_w
+        current_robot_pos = self.robot.data.root_pos_w[:, :2]
+        robot_disp = (current_robot_pos - self._drawer_attach_robot_pos).norm(dim=-1).mean().item()
 
-        # Current EE-handle distance vs attach-time distance
-        current_dist = (ee_world - handle_pos).norm(dim=-1).mean().item()
-        if not hasattr(self, '_drawer_attach_handle_dist'):
-            self._drawer_attach_handle_dist = current_dist
-        # Pull distance = how much further the EE is from handle compared to attach time
-        pull_dist = max(0.0, current_dist - self._drawer_attach_handle_dist)
-
-        if pull_dist > 0.005:  # Only open if actually pulling (5mm deadzone)
-            target_pos = self._drawer_initial_pos + pull_dist
+        if robot_disp > 0.01:  # 1cm deadzone
+            target_pos = self._drawer_initial_pos + robot_disp
             # Clamp to reasonable range
             target_pos = max(0.0, min(0.40, target_pos))
 
