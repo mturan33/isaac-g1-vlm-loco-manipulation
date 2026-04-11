@@ -1113,9 +1113,10 @@ class SkillExecutor:
                     h = obs["base_height"].mean().item()
                     print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
 
-                # Attach when EE gets close to handle (20cm threshold)
-                if ee_to_handle < 0.20:
-                    attached = env.attach_drawer_to_hand(max_dist=0.25)
+                # Try attach — best distance arm achieves is ~0.50m from handle
+                # Robot stands at 0.85m, arm extends ~0.35m forward
+                if ee_to_handle < 0.55:
+                    attached = env.attach_drawer_to_hand(max_dist=0.60)
                     if attached:
                         print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
                         # Record arm position for pull phase
@@ -1403,7 +1404,7 @@ class SkillExecutor:
         if not already_attached:
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.25)
+                attached = env.attach_drawer_to_hand(max_dist=0.60)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:
