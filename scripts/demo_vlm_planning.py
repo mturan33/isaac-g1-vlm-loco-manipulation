@@ -976,7 +976,7 @@ if __name__ == "__main__":
         print("[Demo] Watchdog: forcing exit after timeout")
         os._exit(0)
 
-    timer = threading.Timer(5.0, _force_exit)
+    timer = threading.Timer(30.0, _force_exit)
     timer.daemon = True
     timer.start()
 
