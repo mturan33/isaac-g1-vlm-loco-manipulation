@@ -1014,9 +1014,13 @@ class SkillExecutor:
                 print(f"  [PreReach] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
                       f"EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
 
-        # FREEZE arm at raised position — save targets for hold_arm walk
+        # FREEZE arm at raised position + set wrist horizontal from the start
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+        # Wrist horizontal (right arm: 11=roll, 12=pitch, 13=yaw)
+        self._hold_arm_targets[:, 11] = -1.57
+        self._hold_arm_targets[:, 12] = 0.0
+        self._hold_arm_targets[:, 13] = 0.0
 
         ee_final, _ = env._compute_palm_ee()
         print(f"  [PreReach] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
@@ -1113,9 +1117,9 @@ class SkillExecutor:
                     h = obs["base_height"].mean().item()
                     print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
 
-                # Attach when arm extends toward handle
-                if ee_to_handle < 0.57:
-                    attached = env.attach_drawer_to_hand(max_dist=0.60)
+                # Attach when arm extends toward handle (robot at 1.0m, arm reaches ~0.65m)
+                if ee_to_handle < 0.70:
+                    attached = env.attach_drawer_to_hand(max_dist=0.75)
                     if attached:
                         print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
                         # Record arm position for pull phase
@@ -1403,7 +1407,7 @@ class SkillExecutor:
         if not already_attached:
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.60)
+                attached = env.attach_drawer_to_hand(max_dist=0.75)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:
