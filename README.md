@@ -98,6 +98,17 @@ ollama pull qwen3-vl:4b
 # C:\IsaacLab\source\isaaclab_tasks\isaaclab_tasks\direct\
 ```
 
+### Pre-trained Checkpoints
+
+Pre-trained policies (trained on this same hardware/config) are shipped under `checkpoints/`:
+
+| File | Stage | Size |
+|------|-------|------|
+| `checkpoints/loco_stage2.pt` | Stage 2 Loco (perturbation-robust) | 5.1 MB |
+| `checkpoints/arm_stage2.pt` | Stage 2 Arm (3 cm reach accuracy) | 4.1 MB |
+
+No training required — clone and run demos directly.
+
 ### Run Demos
 
 All commands from `C:\IsaacLab`:
@@ -108,16 +119,16 @@ All commands from `C:\IsaacLab`:
 # Simple planner (no VLM, instant)
 .\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
     --num_envs 1 ^
-    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
-    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\loco_stage2.pt ^
+    --arm_checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\arm_stage2.pt ^
     --task "Pick up the steering wheel from the table" ^
     --planner simple
 
 # VLM planner (requires Ollama running)
 .\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
     --num_envs 1 ^
-    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
-    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\loco_stage2.pt ^
+    --arm_checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\arm_stage2.pt ^
     --task "Pick up the steering wheel from the table" ^
     --planner vlm --vlm_model qwen3-vl:4b
 
@@ -125,8 +136,8 @@ All commands from `C:\IsaacLab`:
 
 .\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
     --num_envs 1 ^
-    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
-    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\loco_stage2.pt ^
+    --arm_checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\arm_stage2.pt ^
     --task "Open the drawer" ^
     --planner vlm --vlm_model qwen3-vl:4b
 
@@ -134,8 +145,8 @@ All commands from `C:\IsaacLab`:
 
 .\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
     --num_envs 1 ^
-    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
-    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\loco_stage2.pt ^
+    --arm_checkpoint source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\checkpoints\arm_stage2.pt ^
     --task "Open the drawer" ^
     --planner vlm --vlm_model qwen3-vl:4b --closed_loop
 
