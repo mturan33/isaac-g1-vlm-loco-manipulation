@@ -79,9 +79,15 @@ class PurePursuitController:
         # Adaptive lookahead: shrink when close to target
         L = min(self.L, max(dist, 0.05))
 
-        # Target behind robot (dx_body < 0): turn in place
-        if dx_body < 0.05:
-            vyaw = self.max_vyaw * (1.0 if dy_body > 0 else -1.0)
+        # Heading error to target
+        heading_err = math.atan2(dy_body, dx_body)
+
+        # Turn-in-place modes:
+        #   1) Target behind robot (dx_body < 0)
+        #   2) FIX: Close (<0.9m) AND misaligned (>23°) — prevents orbiting at min turning radius
+        if dx_body < 0.05 or (dist < 0.9 and abs(heading_err) > 0.4):
+            vyaw_sign = 1.0 if dy_body > 0 else -1.0
+            vyaw = self.max_vyaw * vyaw_sign
             return 0.0, 0.0, max(-self.max_vyaw, min(self.max_vyaw, vyaw))
 
         # Pure Pursuit curvature: κ = 2·dy / L²
@@ -96,7 +102,7 @@ class PurePursuitController:
         vyaw = max(-self.max_vyaw, min(self.max_vyaw, vyaw))
 
         # Alignment gating: suppress vx when heading is off
-        heading_err = math.atan2(dy_body, dx_body)
+        # heading_err already computed above
         alignment = max(0.0, math.cos(heading_err))
         vx *= alignment
 
