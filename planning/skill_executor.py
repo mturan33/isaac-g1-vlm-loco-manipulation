@@ -602,19 +602,20 @@ class SkillExecutor:
                 lateral_correction=0.25,
             )
         else:
+            # FIX v2: vyaw 0.45 → 0.60 (was 0.80 — caused falls; was 0.45 — caused orbit)
+            # vx 0.60 → 0.45 (slower, stable). Min turning radius 0.45/0.60 = 0.75 m.
             pp_normal = PurePursuitController(
-                lookahead_distance=0.5, max_vx=0.60, max_vy=0.30,
-                max_vyaw=0.45, decel_radius=0.5, min_speed=0.10,
+                lookahead_distance=0.4, max_vx=0.45, max_vy=0.30,
+                max_vyaw=0.60, decel_radius=0.6, min_speed=0.08,
                 lateral_correction=0.25,
             )
 
-        # --- Pre-walk yaw correction when carrying ---
-        # Only needed if target is far ahead (forward walk). For lateral-only
-        # walks (carry override sets target at same X), skip yaw correction
-        # entirely — robot keeps current heading and walks sideways.
-        _do_yaw_correction = carrying
+        # --- Pre-walk yaw correction (FIX: always on, prevents orbiting) ---
+        # Carry mode: skip if lateral-only walk (dx ≈ 0)
+        # Normal mode: always do yaw correction (was the missing piece — robot would
+        # orbit the target due to limited vyaw and immediate vx start)
+        _do_yaw_correction = True
         if carrying:
-            # Check if this is a lateral-only walk (dx ≈ 0)
             _rp = env.robot.data.root_pos_w
             _dx = abs(target_xy[0, 0].item() - _rp[0, 0].item())
             _dy = abs(target_xy[0, 1].item() - _rp[0, 1].item())

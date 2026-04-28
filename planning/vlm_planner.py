@@ -540,8 +540,8 @@ class SimplePlanner:
         return [
             # 1. Raise arm HIGH before approaching table (avoids collision)
             {"skill": "pre_reach", "params": {"target": target_obj["id"]}},
-            # 2. Walk to object with arm held up (0.25m -- table blocks closer)
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.40, "hold_arm": True}},
+            # 2. Walk to object with arm held up (FIX: 0.40 → 0.65 — avoid table edge collision)
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.65, "hold_arm": True}},
             # 3. Reach down to object and magnetically attach (10cm threshold)
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             # 4. Close fingers around object
